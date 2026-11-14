@@ -5,7 +5,7 @@ import {
   ShieldCheck, Lock, Unlock, CheckCircle, CheckCircle2, XCircle, Search, RefreshCw, CreditCard, RotateCcw,
   Tag, Star, Download, Plus, Trash2, Filter, AlertCircle, Ban, Check, UserCheck, Shield,
   Layers, ArrowUpRight, ChevronRight, ChevronLeft, Activity, Sliders, CheckSquare, Sparkles, UserPlus, Menu,
-  Landmark, Clock, FileText, ExternalLink, HelpCircle, AlertTriangle, Eye, ShieldAlert, Wallet, Bell
+  Landmark, Clock, FileText, ExternalLink, HelpCircle, AlertTriangle, Eye, ShieldAlert, Wallet, Bell, MessageSquare
 } from 'lucide-react';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
@@ -13,6 +13,7 @@ import { formatDisplayDate } from '../utils/dateUtils';
 import Sidebar from '../components/Sidebar';
 import NotificationBell from '../components/NotificationBell';
 import Pagination from '../components/Pagination';
+import SupportTicketsManagement from '../components/SupportTicketsManagement';
 
 const TAB_TO_SLUG = {
   OVERVIEW: 'overview',
@@ -23,6 +24,7 @@ const TAB_TO_SLUG = {
   REFUNDS: 'refunds',
   PAYMENTS: 'payments',
   COUPONS: 'coupons',
+  TICKETS: 'tickets',
 };
 
 const SLUG_TO_TAB = {
@@ -42,6 +44,8 @@ const SLUG_TO_TAB = {
   payments: 'PAYMENTS',
   coupons: 'COUPONS',
   promos: 'COUPONS',
+  tickets: 'TICKETS',
+  support: 'TICKETS',
 };
 
 const AdminDashboard = () => {
@@ -1989,6 +1993,7 @@ const AdminDashboard = () => {
         { id: 'HOTELS', label: 'Hotels & Properties', icon: Building2, badge: hotelsList.length },
         { id: 'USERS', label: 'Users & Roles', icon: Users, badge: usersList.length },
         { id: 'BOOKINGS', label: 'Reservations & Stays', icon: CalendarCheck, badge: bookingsList.length },
+        { id: 'TICKETS', label: 'Support Tickets', icon: MessageSquare, badge: 'Desk' },
       ]
     },
     {
@@ -2044,7 +2049,8 @@ const AdminDashboard = () => {
                    activeTab === 'BOOKINGS' ? 'Reservations & Stays Register' :
                    activeTab === 'SETTLEMENTS' ? 'Host Settlements & Escrow Management' :
                    activeTab === 'REFUNDS' ? 'Customer Cancellation & Refund Processing' :
-                   activeTab === 'PAYMENTS' ? 'Razorpay Payments Ledger' : 'Promo & Discount Coupons'}
+                   activeTab === 'PAYMENTS' ? 'Razorpay Payments Ledger' :
+                   activeTab === 'TICKETS' ? 'Guest & Owner Support Desk' : 'Promo & Discount Coupons'}
                 </h1>
                 <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-50 text-amber-800 border border-amber-300 font-bold shadow-xs">
                   {activeTab}
@@ -4532,6 +4538,15 @@ const AdminDashboard = () => {
             />
           </div>
           </div>
+        )}
+
+        {/* Tab: Support Tickets Management */}
+        {activeTab === 'TICKETS' && (
+          <SupportTicketsManagement
+            usersList={usersList}
+            hotelsList={hotelsList}
+            bookingsList={bookingsList}
+          />
         )}
 
       </main>

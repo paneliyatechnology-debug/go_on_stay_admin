@@ -304,12 +304,12 @@ const NotificationBell = () => {
       {user && (
         <button
           onClick={handleToggle}
-          className="relative p-2.5 rounded-full glass-pill-light hover:bg-rose-50 text-slate-700 hover:text-rose-600 transition-all cursor-pointer border border-slate-200/80 shadow-2xs flex items-center justify-center"
+          className="relative p-2.5 rounded-full bg-white hover:bg-[#F8FAFC] text-[#475569] transition-all cursor-pointer border border-[#E2E8F0] shadow-2xs flex items-center justify-center"
           title="Notifications & Stay Reminders"
         >
-          <Bell className="w-4 h-4" />
+          <Bell className="w-4 h-4 text-[#475569]" />
           {unreadCount > 0 && (
-            <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-rose-600 text-white text-[10px] font-black flex items-center justify-center animate-bounce shadow-md shadow-rose-600/40">
+            <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-[#0284C7] text-white text-[10px] font-black flex items-center justify-center animate-bounce shadow-md shadow-[#0284C7]/40">
               {unreadCount > 9 ? '9+' : unreadCount}
             </span>
           )}
