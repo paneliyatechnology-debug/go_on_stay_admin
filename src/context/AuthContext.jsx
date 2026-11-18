@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import api from '../services/api';
+import { parseApiError } from '../utils/errorHandler';
 
 const AuthContext = createContext(null);
 
@@ -55,9 +56,9 @@ export const AuthProvider = ({ children }) => {
       showToast(message || 'Welcome to Admin Portal!');
       return { success: true, user: userData };
     } catch (err) {
-      const errorMsg = err.response?.data?.error || err.response?.data?.detail || (err.response ? 'Invalid username or password.' : 'Cannot connect to backend server. Make sure Django backend is reachable.');
-      showToast(errorMsg, 'error');
-      return { success: false, error: errorMsg };
+      const parsed = parseApiError(err, 'Authentication failed. Please verify admin credentials.');
+      showToast(parsed.message, 'error');
+      return { success: false, error: parsed.message, fieldErrors: parsed.fieldErrors };
     }
   };
 

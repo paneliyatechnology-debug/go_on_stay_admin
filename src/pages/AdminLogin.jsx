@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Hotel, Lock, User, ArrowRight, AlertCircle, Eye, EyeOff, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { parseApiError } from '../utils/errorHandler';
+import FieldError from '../components/FieldError';
 
 const AdminLogin = () => {
   const [username, setUsername] = useState('');
@@ -9,6 +11,7 @@ const AdminLogin = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [fieldErrors, setFieldErrors] = useState({});
 
   const { login, user } = useAuth();
   const navigate = useNavigate();
@@ -24,12 +27,22 @@ const AdminLogin = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!username.trim() || !password) {
-      setErrorMsg('Please enter both your Admin username/email and password.');
+    setFieldErrors({});
+    setErrorMsg('');
+
+    if (!username.trim()) {
+      const msg = 'Please enter your Admin username or email.';
+      setFieldErrors({ username: msg });
+      setErrorMsg(msg);
+      return;
+    }
+    if (!password) {
+      const msg = 'Please enter your password.';
+      setFieldErrors({ password: msg });
+      setErrorMsg(msg);
       return;
     }
 
-    setErrorMsg('');
     setLoading(true);
 
     try {
@@ -37,10 +50,14 @@ const AdminLogin = () => {
       if (result.success) {
         navigate(from, { replace: true });
       } else {
-        setErrorMsg(result.error || 'Authentication failed. Please verify admin credentials.');
+        const parsed = parseApiError({ response: { data: result } }, result.error || 'Authentication failed. Please verify admin credentials.');
+        setErrorMsg(result.error || parsed.message);
+        setFieldErrors(result.fieldErrors || { password: result.error || parsed.message });
       }
     } catch (err) {
-      setErrorMsg('Network error. Ensure the Django backend is running at http://127.0.0.1:8000.');
+      const parsed = parseApiError(err, 'Unable to connect to backend server. Make sure Django is running.');
+      setErrorMsg(parsed.message);
+      setFieldErrors(parsed.fieldErrors);
     } finally {
       setLoading(false);
     }
@@ -98,11 +115,20 @@ const AdminLogin = () => {
                   type="text"
                   required
                   value={username}
-                  onChange={(e) => setUsername(e.target.value)}
+                  onChange={(e) => {
+                    setUsername(e.target.value);
+                    if (fieldErrors.username) setFieldErrors((prev) => ({ ...prev, username: '' }));
+                    if (errorMsg) setErrorMsg('');
+                  }}
                   placeholder="Enter admin username or email"
-                  className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 placeholder-slate-400 text-sm font-medium focus:outline-none focus:border-red-600 focus:bg-white focus:ring-2 focus:ring-red-600/10 transition-all"
+                  className={`w-full pl-10 pr-4 py-3 bg-slate-50 border rounded-xl text-slate-900 placeholder-slate-400 text-sm font-medium focus:outline-none focus:bg-white transition-all ${
+                    fieldErrors.username
+                      ? 'border-rose-500 ring-2 ring-rose-500/20 bg-rose-50/10 focus:border-rose-600'
+                      : 'border-slate-200 focus:border-red-600 focus:ring-2 focus:ring-red-600/10'
+                  }`}
                 />
               </div>
+              <FieldError error={fieldErrors.username} />
             </div>
 
             {/* Password Field with Show/Hide Toggle */}
@@ -118,9 +144,17 @@ const AdminLogin = () => {
                   type={showPassword ? 'text' : 'password'}
                   required
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    if (fieldErrors.password) setFieldErrors((prev) => ({ ...prev, password: '' }));
+                    if (errorMsg) setErrorMsg('');
+                  }}
                   placeholder="••••••••••••"
-                  className="w-full pl-10 pr-11 py-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 placeholder-slate-400 text-sm font-medium focus:outline-none focus:border-red-600 focus:bg-white focus:ring-2 focus:ring-red-600/10 transition-all"
+                  className={`w-full pl-10 pr-11 py-3 bg-slate-50 border rounded-xl text-slate-900 placeholder-slate-400 text-sm font-medium focus:outline-none focus:bg-white transition-all ${
+                    fieldErrors.password
+                      ? 'border-rose-500 ring-2 ring-rose-500/20 bg-rose-50/10 focus:border-rose-600'
+                      : 'border-slate-200 focus:border-red-600 focus:ring-2 focus:ring-red-600/10'
+                  }`}
                 />
                 <button
                   type="button"
@@ -135,6 +169,7 @@ const AdminLogin = () => {
                   )}
                 </button>
               </div>
+              <FieldError error={fieldErrors.password} />
             </div>
 
             {/* Submit Action Button */}

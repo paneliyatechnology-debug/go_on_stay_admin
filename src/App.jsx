@@ -13,7 +13,7 @@ const App = () => {
     <ErrorBoundary>
       <AuthProvider>
         <Router>
-          <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
+          <div className="min-h-screen bg-[#F4F6F9] flex flex-col font-sans">
             <Routes>
               {/* Public Admin Auth Route */}
               <Route path="/login" element={<AdminLogin />} />

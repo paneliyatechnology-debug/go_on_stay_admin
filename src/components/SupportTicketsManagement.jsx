@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { parseApiError } from '../utils/errorHandler';
 
 const SupportTicketsManagement = ({ usersList = [], hotelsList = [], bookingsList = [] }) => {
   const { user: currentAdmin, showToast } = useAuth();
@@ -44,7 +45,8 @@ const SupportTicketsManagement = ({ usersList = [], hotelsList = [], bookingsLis
       setTickets(Array.isArray(list) ? list : []);
     } catch (err) {
       console.error('Failed to load tickets:', err);
-      showToast?.('Failed to load support tickets from server.', 'error');
+      const parsed = parseApiError(err, 'Failed to load support tickets from server.');
+      showToast?.(parsed.message, 'error');
     } finally {
       setLoading(false);
     }
@@ -114,8 +116,8 @@ const SupportTicketsManagement = ({ usersList = [], hotelsList = [], bookingsLis
       setTickets(prev => prev.map(t => t.id === ticketRes.data.id ? ticketRes.data : t));
     } catch (err) {
       console.error('Failed to send reply:', err);
-      const msg = err.response?.data?.error || err.response?.data?.detail || 'Failed to send reply.';
-      showToast?.(msg, 'error');
+      const parsed = parseApiError(err, 'Failed to send reply.');
+      showToast?.(parsed.message, 'error');
     } finally {
       setSendingReply(false);
     }
@@ -132,8 +134,8 @@ const SupportTicketsManagement = ({ usersList = [], hotelsList = [], bookingsLis
       showToast?.(successMsg || 'Ticket updated successfully!', 'success');
     } catch (err) {
       console.error('Failed to update ticket:', err);
-      const msg = err.response?.data?.error || 'Failed to update ticket.';
-      showToast?.(msg, 'error');
+      const parsed = parseApiError(err, 'Failed to update ticket.');
+      showToast?.(parsed.message, 'error');
     } finally {
       setUpdatingTicket(false);
     }

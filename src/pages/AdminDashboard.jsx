@@ -10,6 +10,8 @@ import {
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { formatDisplayDate } from '../utils/dateUtils';
+import { parseApiError } from '../utils/errorHandler';
+import FieldError from '../components/FieldError';
 import Sidebar from '../components/Sidebar';
 import NotificationBell from '../components/NotificationBell';
 import Pagination from '../components/Pagination';
@@ -81,6 +83,7 @@ const AdminDashboard = () => {
   const [showProviderGuideModal, setShowProviderGuideModal] = useState(false);
   const [editingHoldDays, setEditingHoldDays] = useState('7');
   const [savingHoldDays, setSavingHoldDays] = useState(false);
+  const [selectedMonthAnalytics, setSelectedMonthAnalytics] = useState(null);
 
   // Hotel-Wise Holding & Settlements State
   const [hotelsSummary, setHotelsSummary] = useState([]);
@@ -233,51 +236,8 @@ const AdminDashboard = () => {
       let rawBookings = bookingsRes.status === 'fulfilled' ? (bookingsRes.value.data.results || bookingsRes.value.data || []) : [];
       let rawSettlements = settlementsRes.status === 'fulfilled' ? (settlementsRes.value.data?.results || []) : [];
 
-      try {
-        const localRefunds = JSON.parse(localStorage.getItem('bmr_admin_refunds') || '{}');
-        const checkIsRef = (keys) => {
-          for (const k of keys) {
-            if (!k) continue;
-            const strK = String(k).trim();
-            const clean = strK.replace(/^#/, '');
-            if (localRefunds[strK] || localRefunds[clean] || localRefunds[`#${clean}`]) {
-              return localRefunds[strK] || localRefunds[clean] || localRefunds[`#${clean}`];
-            }
-          }
-          return null;
-        };
-
-        rawBookings = rawBookings.map(b => {
-          const ref = checkIsRef([b.id, b.booking_id, b.booking_reference]);
-          if (ref) {
-            return {
-              ...b,
-              payment_status: 'REFUNDED',
-              refund_status: 'REFUNDED',
-              status: 'REFUNDED',
-              utr: ref.utr || b.utr,
-              refund_arn: ref.refund_arn || b.refund_arn
-            };
-          }
-          return b;
-        });
-
-        rawSettlements = rawSettlements.map(s => {
-          const ref = checkIsRef([s.booking_id, s.booking, s.id, s.settlement_id]);
-          if (ref) {
-            return {
-              ...s,
-              status: 'REFUNDED',
-              refund_status: 'REFUNDED',
-              is_eligible: false,
-              utr: ref.utr || s.utr
-            };
-          }
-          return s;
-        });
-      } catch (e) {}
-
       setBookingsList(rawBookings);
+      setSettlementsList(rawSettlements);
       if (paymentsRes.status === 'fulfilled') setPaymentsList(paymentsRes.value.data.results || paymentsRes.value.data);
       if (couponsRes.status === 'fulfilled') setCouponsList(couponsRes.value.data.results || couponsRes.value.data);
 
@@ -457,8 +417,8 @@ const AdminDashboard = () => {
       fetchAdminData();
     } catch (err) {
       console.error('Hotel payout error:', err);
-      const msg = err.response?.data?.error || (err.response?.data?.details ? err.response.data.details.join('; ') : 'Failed to initiate hotel payout.');
-      showToast(msg, 'error');
+      const parsed = parseApiError(err, 'Failed to initiate hotel payout.');
+      showToast(parsed.message, 'error');
     } finally {
       setProcessingPayout(false);
     }
@@ -475,8 +435,8 @@ const AdminDashboard = () => {
       fetchAdminData();
     } catch (err) {
       console.error('Save bank details error:', err);
-      const msg = err.response?.data?.error || 'Failed to save owner banking details.';
-      showToast(msg, 'error');
+      const parsed = parseApiError(err, 'Failed to save owner banking details.');
+      showToast(parsed.message, 'error');
     } finally {
       setSavingBankDetails(false);
     }
@@ -496,8 +456,8 @@ const AdminDashboard = () => {
       fetchAdminData();
     } catch (err) {
       console.error('Toggle dispute error:', err);
-      const msg = err.response?.data?.error || 'Failed to update dispute status.';
-      showToast(msg, 'error');
+      const parsed = parseApiError(err, 'Failed to update dispute status.');
+      showToast(parsed.message, 'error');
     }
   };
 
@@ -1083,48 +1043,10 @@ const AdminDashboard = () => {
         return s;
       }));
 
-      // Persist admin refund execution across all ID variants
-      try {
-        const existingRefunds = JSON.parse(localStorage.getItem('bmr_admin_refunds') || '{}');
-        const refundRecord = {
-          status: 'REFUNDED',
-          refund_amount: refundAmount,
-          refund_arn: actualPayoutId,
-          refunded_at: new Date().toISOString()
-        };
-
-        const allKeysToSave = new Set([
-          String(bookingId),
-          String(bookingId).replace(/^#/, ''),
-          `#${String(bookingId).replace(/^#/, '')}`,
-          String(selectedRefundBooking?.id || ''),
-          String(selectedRefundBooking?.booking_id || ''),
-          String(selectedRefundBooking?.booking_id || '').replace(/^#/, ''),
-          `#${String(selectedRefundBooking?.booking_id || '').replace(/^#/, '')}`,
-          String(selectedRefundBooking?.booking_reference || ''),
-          String(selectedRefundBooking?.booking_reference || '').replace(/^#/, ''),
-          String(selectedRefundBooking?.settlement_id || ''),
-          String(selectedRefundBooking?.earning_id || ''),
-          String(selectedRefundBooking?._source_earning_id || ''),
-          String(selectedRefundBooking?._source_earning_booking_id || ''),
-          String(selectedRefundBooking?._source_earning_booking || '')
-        ]);
-
-        allKeysToSave.forEach(key => {
-          if (key && key !== '#' && key !== 'undefined') {
-            existingRefunds[key] = refundRecord;
-          }
-        });
-
-        localStorage.setItem('bmr_admin_refunds', JSON.stringify(existingRefunds));
-      } catch (err) {
-        console.warn('Failed to cache refund status:', err);
-      }
-
       setTimeout(() => {
         setShowProcessRefundModal(false);
         fetchAdminData();
-      }, 1200);
+      }, 1000);
 
     } catch (err) {
       console.error('Refund execution error:', err);
@@ -1187,23 +1109,11 @@ const AdminDashboard = () => {
       showToast(`✅ Payout Successful! ID: ${finalPayoutId} (UTR: ${finalUtr})`, 'success');
       setPayoutIdempotencyKey('');
 
-      // Persist to localStorage
-      try {
-        const existingRefunds = JSON.parse(localStorage.getItem('bmr_admin_refunds') || '{}');
-        existingRefunds[String(bId)] = {
-          status: 'REFUNDED',
-          refund_arn: finalPayoutId,
-          utr: finalUtr,
-          refunded_at: new Date().toISOString()
-        };
-        localStorage.setItem('bmr_admin_refunds', JSON.stringify(existingRefunds));
-      } catch (e) {}
-
       setTimeout(() => {
         setShowProcessRefundModal(false);
         setSelectedRefundBooking(null);
         setRefundAdminNotes('');
-      }, 1500);
+      }, 1000);
       await fetchAdminData();
     } catch (err) {
       console.warn('API 5 Customer payout status check error:', err);
@@ -1570,6 +1480,8 @@ const AdminDashboard = () => {
       const monthIndex = d.getMonth();
 
       const monthBookings = bookingsList.filter((b) => {
+        if (b.booking_status === 'PENDING_PAYMENT' && b.payment_status === 'PENDING') return false;
+
         if (!b.created_at) return false;
         const bDate = new Date(b.created_at);
         return bDate.getFullYear() === year && bDate.getMonth() === monthIndex;
@@ -1585,9 +1497,12 @@ const AdminDashboard = () => {
       months.push({
         month: `${monthKey} ${year}`,
         monthShort: monthKey,
+        year,
+        monthIndex,
         revenue,
         bookingsCount: monthBookings.length,
         confirmedCount: confirmed.length,
+        bookings: monthBookings,
       });
     }
     return months;
@@ -1627,6 +1542,9 @@ const AdminDashboard = () => {
     // Status filter
     if (paymentStatusFilter !== 'ALL') {
       list = list.filter(p => p.status === paymentStatusFilter);
+    } else {
+      // By default in 'ALL', only show actual payment transactions and exclude orphan unpaid/testing CREATED attempts
+      list = list.filter(p => p.status !== 'CREATED');
     }
 
     // Search query filter
@@ -1655,14 +1573,16 @@ const AdminDashboard = () => {
       const captured = items.find(i => i.status === 'CAPTURED');
       const refunded = items.find(i => i.status === 'REFUNDED' || i.status === 'PARTIALLY_REFUNDED');
       const failed = items.find(i => i.status === 'FAILED');
-      const primary = captured || refunded || failed || items[0];
+      const primary = captured || refunded || failed || (paymentStatusFilter === 'CREATED' ? items[0] : null);
 
-      summary.push({
-        ...primary,
-        attempts_count: items.length,
-        has_multiple_captured: items.filter(i => i.status === 'CAPTURED').length > 1,
-        all_attempts: items
-      });
+      if (primary) {
+        summary.push({
+          ...primary,
+          attempts_count: items.length,
+          has_multiple_captured: items.filter(i => i.status === 'CAPTURED').length > 1,
+          all_attempts: items
+        });
+      }
     });
 
     return summary;
@@ -1697,12 +1617,11 @@ const AdminDashboard = () => {
     );
   });
   const filteredBookings = bookingsList.filter(b => {
+    if (b.booking_status === 'PENDING_PAYMENT' && b.payment_status === 'PENDING') return false;
+
     if (!q) return true;
     const hotelName = b.hotel_details?.name?.toLowerCase() || '';
     const ownerName = b.hotel_details?.owner_name?.toLowerCase() || '';
-    const guestName = (b.guest_name || b.customer_name || '')?.toLowerCase();
-    const guestEmail = (b.guest_email || '')?.toLowerCase();
-    const guestPhone = (b.guest_phone || '')?.toLowerCase();
     const bookingId = (b.booking_id || b.id?.toString() || '')?.toLowerCase();
     const status = (b.booking_status || '')?.toLowerCase();
     const payStatus = (b.payment_status || '')?.toLowerCase();
@@ -1747,8 +1666,7 @@ const AdminDashboard = () => {
       return true;
     }
 
-    try {
-      const localRefunds = JSON.parse(localStorage.getItem('bmr_admin_refunds') || '{}');
+    if (adminRefundsApiList && adminRefundsApiList.length > 0) {
       const candidateKeys = [
         earning?.id,
         earning?.booking_id,
@@ -1761,13 +1679,12 @@ const AdminDashboard = () => {
         tBooking?._source_earning_id
       ].filter(Boolean).map(String);
 
-      for (const key of candidateKeys) {
-        const clean = key.replace(/^#/, '');
-        if (localRefunds[key] || localRefunds[clean] || localRefunds[`#${clean}`]) {
-          return true;
-        }
-      }
-    } catch (e) {}
+      const isFoundInBackendRefunds = adminRefundsApiList.some(r => {
+        const rBookingId = String(r.booking_id || r.booking || r.id || '').replace(/^#/, '');
+        return candidateKeys.some(k => String(k).replace(/^#/, '') === rBookingId);
+      });
+      if (isFoundInBackendRefunds) return true;
+    }
     return false;
   };
 
@@ -1992,7 +1909,7 @@ const AdminDashboard = () => {
         { id: 'OVERVIEW', label: 'Executive Overview', icon: Activity, badge: null },
         { id: 'HOTELS', label: 'Hotels & Properties', icon: Building2, badge: hotelsList.length },
         { id: 'USERS', label: 'Users & Roles', icon: Users, badge: usersList.length },
-        { id: 'BOOKINGS', label: 'Reservations & Stays', icon: CalendarCheck, badge: bookingsList.length },
+        { id: 'BOOKINGS', label: 'Reservations & Stays', icon: CalendarCheck, badge: filteredBookings.length },
         { id: 'TICKETS', label: 'Support Tickets', icon: MessageSquare, badge: 'Desk' },
       ]
     },
@@ -2019,7 +1936,7 @@ const AdminDashboard = () => {
   };
 
   return (
-    <div className="bg-[#F4F6F9] text-slate-900 min-h-screen flex font-sans select-none [&_input]:select-text [&_textarea]:select-text selection:bg-transparent selection:text-inherit min-w-[1280px]">
+    <div className="bg-[#F4F6F9] text-slate-900 min-h-screen flex font-sans select-none [&_input]:select-text [&_textarea]:select-text selection:bg-transparent selection:text-inherit">
       
       {/* Permanent Desktop Sidebar */}
       <Sidebar
@@ -2034,7 +1951,7 @@ const AdminDashboard = () => {
       />
 
       {/* Main Desktop Content Workspace */}
-      <div className="flex-1 min-w-0 flex flex-col min-h-screen pb-16 overflow-y-auto bg-[#F4F6F9]">
+      <div className="flex-1 min-w-0 flex flex-col bg-[#F4F6F9]">
         
         {/* Top Desktop Sticky Header */}
         <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200/90 px-8 py-3.5 flex items-center justify-between gap-4 shadow-xs">
@@ -2061,13 +1978,13 @@ const AdminDashboard = () => {
 
           {/* Luxury Top Header Search Bar */}
           <div className="relative w-64 sm:w-80 lg:w-96 hidden md:block">
-            <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+            <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-600" />
             <input
               type="text"
               placeholder="Search bookings, hotels, users..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-8 py-2 bg-slate-100 border border-slate-200 rounded-xl text-xs font-semibold text-slate-900 placeholder-slate-400 focus:outline-none focus:border-[#D8A74B] focus:bg-white transition-all shadow-inner"
+              className="w-full pl-9 pr-8 py-2 bg-slate-100 border border-slate-200 rounded-xl text-xs font-normal text-slate-900 placeholder:text-slate-600 placeholder:font-normal focus:outline-none focus:border-[#D8A74B] focus:bg-white transition-all shadow-inner"
             />
             {searchQuery && (
               <button
@@ -2098,7 +2015,7 @@ const AdminDashboard = () => {
         </header>
 
         {/* Main Body Content */}
-        <main className="max-w-7xl mx-auto w-full px-8 pt-6 space-y-7 flex-1 bg-[#F4F6F9]">
+        <main className="max-w-7xl mx-auto w-full px-4 sm:px-8 pt-6 pb-6 space-y-7 flex-1 bg-[#F4F6F9]">
 
         {/* Payout Day Alert Banner: Only shows when a host has an actual mature payout due (> ₹0.00) */}
         {(activeTab === 'OVERVIEW' || activeTab === 'SETTLEMENTS') && liveEligibleCount > 0 && liveEligibleTotal > 0 && (
@@ -2300,7 +2217,9 @@ const AdminDashboard = () => {
                     <span className="text-slate-900 font-extrabold flex items-center gap-1.5">
                       <BarChart3 className="w-4 h-4 text-[#D4AF37]" /> Monthly Gross Booking Volume (₹)
                     </span>
-                    <span className="text-slate-900 font-bold text-[11px]">Hover bars for details</span>
+                    <span className="text-amber-700 font-bold text-[11px] bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                      Click any month to view all orders
+                    </span>
                   </div>
 
                   {(() => {
@@ -2311,29 +2230,35 @@ const AdminDashboard = () => {
                           {monthlyAnalyticsData.map((item, idx) => {
                             const barHeight = Math.max(14, Math.round((item.revenue / maxRevenue) * 150));
                             const isHovered = hoveredBarIndex === idx;
+                            const isSelected = selectedMonthAnalytics?.month === item.month;
 
                             return (
                               <div
                                 key={item.month}
-                                className="flex-1 flex flex-col items-center gap-2 relative group cursor-pointer"
+                                className="flex-1 flex flex-col items-center gap-2 relative group cursor-pointer transition-transform hover:scale-105 active:scale-95"
                                 onMouseEnter={() => setHoveredBarIndex(idx)}
                                 onMouseLeave={() => setHoveredBarIndex(null)}
+                                onClick={() => setSelectedMonthAnalytics(item)}
+                                title={`Click to view all ${item.bookingsCount} orders for ${item.month}`}
                               >
                                 {/* Tooltip */}
                                 {isHovered && (
-                                  <div className="absolute -top-14 z-20 bg-slate-950 border border-[#D4AF37]/50 text-white rounded-xl px-3 py-1.5 text-center shadow-xl shadow-amber-500/10 pointer-events-none whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                                  <div className="absolute -top-16 z-20 bg-slate-950 border border-[#D4AF37]/50 text-white rounded-xl px-3 py-1.5 text-center shadow-xl shadow-amber-500/10 pointer-events-none whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
                                     <div className="text-[10px] text-slate-300 font-bold">{item.month}</div>
                                     <div className="text-xs font-black text-[#F3E5AB]">₹{item.revenue.toLocaleString('en-IN')}</div>
                                     <div className="text-[9px] text-[#D4AF37] font-semibold">{item.bookingsCount} Stays ({item.confirmedCount} Confirmed)</div>
+                                    <div className="text-[9px] text-amber-200 font-bold mt-0.5">Click to view orders →</div>
                                   </div>
                                 )}
 
                                 {/* Bar */}
-                                <div className="w-full max-w-[48px] bg-slate-200 rounded-t-xl overflow-hidden flex items-end">
+                                <div className={`w-full max-w-[48px] bg-slate-200 rounded-t-xl overflow-hidden flex items-end transition-all ${
+                                  isSelected ? 'ring-2 ring-amber-500 ring-offset-2' : ''
+                                }`}>
                                   <div
                                     style={{ height: `${barHeight}px` }}
                                     className={`w-full rounded-t-xl transition-all duration-300 ${
-                                      isHovered
+                                      isHovered || isSelected
                                         ? 'bg-gradient-to-t from-[#D4AF37] via-[#F3E5AB] to-[#FFFFFF] shadow-lg shadow-amber-500/30'
                                         : 'bg-gradient-to-t from-[#AA7C11] via-[#D4AF37] to-[#F3E5AB]'
                                     }`}
@@ -2341,7 +2266,13 @@ const AdminDashboard = () => {
                                 </div>
 
                                 {/* Month Label */}
-                                <span className={`text-[11px] font-bold transition-colors ${isHovered ? 'text-amber-700 font-black' : 'text-slate-900 font-extrabold'}`}>
+                                <span className={`text-[11px] transition-all px-2 py-0.5 rounded-md ${
+                                  isSelected
+                                    ? 'bg-amber-600 text-white font-black shadow-xs'
+                                    : isHovered
+                                    ? 'text-amber-800 font-black bg-amber-100'
+                                    : 'text-slate-900 font-extrabold hover:text-amber-700'
+                                }`}>
                                   {item.monthShort}
                                 </span>
                               </div>
@@ -2512,7 +2443,7 @@ const AdminDashboard = () => {
           <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
-                <thead className="bg-slate-50 text-slate-900 font-black uppercase tracking-wider border-b border-slate-200">
+                <thead className="bg-slate-50 text-slate-900 font-bold uppercase tracking-wider border-b border-slate-200">
                   <tr>
                     <th className="p-4">Hotel Property</th>
                     <th className="p-4">Hotel Owner & Status</th>
@@ -2523,47 +2454,47 @@ const AdminDashboard = () => {
                     <th className="p-4 text-right">Super Admin Actions</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
+                <tbody className="divide-y divide-slate-100 font-normal text-black">
                   {filteredHotels.length === 0 ? (
                     <tr>
-                      <td colSpan="7" className="p-8 text-center text-slate-900 font-black">No hotel properties match the search criteria.</td>
+                      <td colSpan="7" className="p-8 text-center text-black font-normal">No hotel properties match the search criteria.</td>
                     </tr>
                   ) : (
                     filteredHotels.slice((adminHotelsPage - 1) * 10, adminHotelsPage * 10).map((h) => (
                       <tr key={h.id} className="hover:bg-slate-50/80 transition-colors">
                         <td className="p-4">
-                          <div className="font-extrabold text-slate-900 text-sm">{h.name}</div>
-                          <span className="text-[10px] text-slate-900 font-medium font-mono">{h.property_type || 'Hotel Property'}</span>
+                          <div className="font-normal text-black text-sm">{h.name}</div>
+                          <span className="text-[10px] text-black font-normal font-mono">{h.property_type || 'Hotel Property'}</span>
                         </td>
                         <td className="p-4">
-                          <div className="font-bold text-slate-900 flex items-center gap-1">
-                            <Users className="w-3.5 h-3.5 text-red-600 shrink-0" />
+                          <div className="font-normal text-black flex items-center gap-1">
+                            <Users className="w-3.5 h-3.5 text-slate-600 shrink-0" />
                             {h.owner_name || 'N/A'}
                           </div>
                           {h.owner_email && (
-                            <div className="text-xs text-slate-900 font-medium">{h.owner_email}</div>
+                            <div className="text-xs text-black font-normal">{h.owner_email}</div>
                           )}
                           {h.owner_phone && (
-                            <div className="text-[10px] text-red-600 font-mono">📞 {h.owner_phone}</div>
+                            <div className="text-[10px] text-black font-normal font-mono">📞 {h.owner_phone}</div>
                           )}
                           <div className="mt-1">
                             {h.owner_is_blocked ? (
-                              <span className="inline-flex items-center gap-1 text-[10px] font-black text-rose-700 bg-rose-50 px-2 py-0.5 rounded border border-rose-200">
+                              <span className="inline-flex items-center gap-1 text-[10px] font-normal text-rose-700 bg-rose-50 px-2 py-0.5 rounded border border-rose-200">
                                 <Lock className="w-2.5 h-2.5 shrink-0" /> Owner Blocked
                               </span>
                             ) : (
-                              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                              <span className="inline-flex items-center gap-1 text-[10px] font-normal text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
                                 <CheckCircle2 className="w-2.5 h-2.5 shrink-0" /> Owner Active
                               </span>
                             )}
                           </div>
                         </td>
-                        <td className="p-4 text-slate-700">
-                          <div className="font-bold text-slate-900">{h.city}</div>
-                          {h.address && <div className="text-[10px] text-slate-900 font-medium truncate max-w-[150px]">{h.address}</div>}
+                        <td className="p-4 text-black font-normal">
+                          <div className="font-normal text-black">{h.city}</div>
+                          {h.address && <div className="text-[10px] text-black font-normal truncate max-w-[150px]">{h.address}</div>}
                         </td>
-                        <td className="p-4 text-amber-500 font-bold">{h.star_rating} ★</td>
-                        <td className="p-4 text-red-600 font-black text-sm">₹{h.starting_price}/night</td>
+                        <td className="p-4 text-black font-normal">{h.star_rating} ★</td>
+                        <td className="p-4 text-black font-normal text-sm">₹{h.starting_price}/night</td>
                         <td className="p-4">
                           <span className={`px-2.5 py-1 rounded-md text-[10px] font-black uppercase tracking-wider ${
                             h.status === 'SUSPENDED' || h.owner_is_blocked ? 'bg-amber-50 text-amber-700 border border-amber-200' :
@@ -2667,7 +2598,7 @@ const AdminDashboard = () => {
           <div className="space-y-4">
             
             {/* Role Filter Tabs */}
-            <div className="flex flex-wrap items-center gap-2 p-1.5 bg-[#111726] border border-slate-800/90 rounded-2xl w-fit shadow-lg">
+            <div className="flex flex-wrap items-center gap-2 p-1.5 bg-[#111726] border border-slate-800/90 rounded-2xl w-full shadow-lg">
               {[
                 { id: 'ALL', label: 'All Accounts', count: usersList.length },
                 { id: 'HOTEL_OWNER', label: '🏨 Hotel Owners', count: usersList.filter(u => u.role === 'HOTEL_OWNER').length },
@@ -2678,7 +2609,7 @@ const AdminDashboard = () => {
                 <button
                   key={tab.id}
                   onClick={() => setUserRoleFilter(tab.id)}
-                  className={`px-3.5 py-1.5 rounded-xl text-xs font-black transition-all flex items-center gap-2 cursor-pointer ${
+                  className={`flex-1 min-w-[150px] px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
                     userRoleFilter === tab.id
                       ? 'bg-gradient-to-r from-[#BF8E36] via-[#D8A74B] to-[#BF8E36] text-slate-950 font-black shadow-md shadow-amber-950/30'
                       : 'text-white hover:text-[#F3E5AB] hover:bg-white/10'
@@ -2697,7 +2628,7 @@ const AdminDashboard = () => {
             <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-50 text-slate-900 font-black uppercase tracking-wider border-b border-slate-200">
+                  <thead className="bg-slate-50 text-slate-900 font-bold uppercase tracking-wider border-b border-slate-200">
                     <tr>
                       <th className="p-4">User ID & Name</th>
                       <th className="p-4">Email Address</th>
@@ -2708,10 +2639,10 @@ const AdminDashboard = () => {
                       <th className="p-4 text-right">Super Admin Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
+                  <tbody className="divide-y divide-slate-100 font-normal text-black">
                     {filteredUsers.length === 0 ? (
                       <tr>
-                        <td colSpan="7" className="p-8 text-center text-slate-900 font-black">
+                        <td colSpan="7" className="p-8 text-center text-black font-normal">
                           No user accounts match the selected filter.
                         </td>
                       </tr>
@@ -2719,12 +2650,12 @@ const AdminDashboard = () => {
                       filteredUsers.slice((adminUsersPage - 1) * 10, adminUsersPage * 10).map((u) => (
                         <tr key={u.id} className="hover:bg-slate-50/80 transition-colors">
                           <td className="p-4">
-                            <div className="font-extrabold text-slate-900 text-sm">{`${u.first_name || ''} ${u.last_name || ''}`.trim() || u.username}</div>
-                            <span className="text-[11px] text-slate-900 font-semibold font-mono">@{u.username}</span>
+                            <div className="font-normal text-black text-sm">{`${u.first_name || ''} ${u.last_name || ''}`.trim() || u.username}</div>
+                            <span className="text-[11px] text-black font-normal font-mono">@{u.username}</span>
                           </td>
-                          <td className="p-4 text-slate-900 font-mono font-bold">{u.email}</td>
+                          <td className="p-4 text-black font-mono font-normal">{u.email}</td>
                           <td className="p-4">
-                            <span className={`px-2.5 py-1 rounded-md text-[10px] font-black uppercase tracking-wider ${
+                            <span className={`px-2.5 py-1 rounded-md text-[10px] font-normal uppercase tracking-wider ${
                               u.role === 'ADMIN' || u.role === 'SUPER_ADMIN' ? 'bg-red-50 text-red-700 border border-red-200' :
                               u.role === 'HOTEL_OWNER' ? 'bg-sky-50 text-sky-700 border border-sky-200' :
                               u.role === 'HOTEL_STAFF' ? 'bg-indigo-50 text-indigo-700 border border-indigo-200' :
@@ -2733,13 +2664,13 @@ const AdminDashboard = () => {
                               {u.role || 'CUSTOMER'}
                             </span>
                             {u.role === 'HOTEL_OWNER' && (
-                              <span className="text-[10px] text-slate-900 font-medium font-bold block mt-1">
+                              <span className="text-[10px] text-black font-normal block mt-1">
                                 🏨 {u.hotels_count ?? 0} Properties
                               </span>
                             )}
                           </td>
-                          <td className="p-4 text-slate-900 font-mono font-bold">{u.phone_number || 'N/A'}</td>
-                          <td className="p-4 text-slate-600 font-mono text-[11px]">
+                          <td className="p-4 text-black font-mono font-normal">{u.phone_number || 'N/A'}</td>
+                          <td className="p-4 text-black font-mono text-[11px] font-normal">
                             {u.created_at ? new Date(u.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : 'N/A'}
                           </td>
                           <td className="p-4">
@@ -2807,7 +2738,7 @@ const AdminDashboard = () => {
           <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
-                <thead className="bg-slate-50 text-slate-900 font-black uppercase tracking-wider border-b border-slate-200">
+                <thead className="bg-slate-50 text-slate-900 font-bold uppercase tracking-wider border-b border-slate-200">
                   <tr>
                     <th className="p-4">Booking ID</th>
                     <th className="p-4">Guest Details</th>
@@ -2818,40 +2749,40 @@ const AdminDashboard = () => {
                     <th className="p-4">Payment Status</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
+                <tbody className="divide-y divide-slate-100 font-normal text-black">
                   {filteredBookings.length === 0 ? (
                     <tr>
-                      <td colSpan="7" className="p-8 text-center text-slate-900 font-black">No reservations found.</td>
+                      <td colSpan="7" className="p-8 text-center text-black font-normal">No reservations found.</td>
                     </tr>
                   ) : (
                     filteredBookings.slice((adminBookingsPage - 1) * 10, adminBookingsPage * 10).map((b) => (
                       <tr key={b.id} className="hover:bg-slate-50/80 transition-colors">
                         <td className="p-4 font-mono text-sm">
-                          <div className="font-black text-slate-900 text-sm">#{b.id}</div>
-                          {b.booking_id && <div className="text-xs text-slate-900 font-mono font-black mt-0.5">{b.booking_id}</div>}
+                          <div className="font-normal text-black text-sm">#{b.id}</div>
+                          {b.booking_id && <div className="text-xs text-black font-mono font-normal mt-0.5">{b.booking_id}</div>}
                         </td>
                         <td className="p-4">
-                          <div className="font-black text-slate-900 text-sm">{b.guest_name || b.customer_name || 'Guest'}</div>
+                          <div className="font-normal text-black text-sm">{b.guest_name || b.customer_name || 'Guest'}</div>
                           {b.guest_phone && (
-                            <div className="text-[11px] text-red-600 font-mono font-bold">
+                            <div className="text-[11px] text-black font-mono font-normal">
                               📞 {b.guest_phone}
                             </div>
                           )}
-                          {b.guest_email && <div className="text-xs text-slate-900 font-bold mt-0.5">{b.guest_email}</div>}
+                          {b.guest_email && <div className="text-xs text-black font-normal mt-0.5">{b.guest_email}</div>}
                         </td>
                         <td className="p-4">
-                          <div className="font-extrabold text-slate-900 text-sm">{b.hotel_details?.name || `Hotel #${b.hotel}`}</div>
-                          <div className="text-[11px] text-teal-800 font-semibold mt-0.5">
-                            {b.room_details?.title || 'Room Category'} • <span className="font-mono text-red-600 font-bold">Unit: {b.room_number || 'Room 101'}</span>
+                          <div className="font-normal text-black text-sm">{b.hotel_details?.name || `Hotel #${b.hotel}`}</div>
+                          <div className="text-[11px] text-black font-normal mt-0.5">
+                            {b.room_details?.title || 'Room Category'} • <span className="font-mono text-black font-normal">Unit: {b.room_number || 'Room 101'}</span>
                           </div>
                           {b.hotel_details?.owner_name && (
-                            <div className="text-[10px] text-slate-900 font-medium font-medium">
+                            <div className="text-[10px] text-black font-normal">
                               Host: {b.hotel_details.owner_name}
                             </div>
                           )}
                         </td>
-                        <td className="p-4 text-slate-900 font-bold whitespace-nowrap min-w-[170px] text-xs font-semibold">{formatDisplayDate(b.check_in)} <span className="text-slate-900 font-medium">→</span> {formatDisplayDate(b.check_out)}</td>
-                        <td className="p-4 text-red-600 font-black text-sm">₹{b.total_amount}</td>
+                        <td className="p-4 text-black font-normal whitespace-nowrap min-w-[170px] text-xs">{formatDisplayDate(b.check_in)} <span className="text-black font-normal">→</span> {formatDisplayDate(b.check_out)}</td>
+                        <td className="p-4 text-black font-normal text-sm">₹{b.total_amount}</td>
                         <td className="p-4">
                           <span className={`px-2 py-0.5 rounded-md text-[10px] font-black uppercase ${
                             b.booking_status === 'CONFIRMED' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
@@ -3382,7 +3313,7 @@ const AdminDashboard = () => {
 
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-50 text-slate-900 font-black uppercase tracking-wider border-b border-slate-200">
+                  <thead className="bg-slate-50 text-slate-900 font-bold uppercase tracking-wider border-b border-slate-200">
                     <tr>
                       <th className="p-4">Settlement ID</th>
                       <th className="p-4">Hotel Property & Host</th>
@@ -3395,7 +3326,7 @@ const AdminDashboard = () => {
                       <th className="p-4 text-right">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
+                  <tbody className="divide-y divide-slate-100 font-normal text-black">
                     {filteredSettlements.length === 0 ? (
                       <tr>
                         <td colSpan="9" className="p-12 text-center text-slate-900 font-black">
@@ -3450,29 +3381,29 @@ const AdminDashboard = () => {
                         return (
                           <tr key={earning.id} className="hover:bg-slate-50/80 transition-colors">
                             <td className="p-4 font-mono text-sm">
-                              <div className="font-black text-slate-900 text-sm">#{earning.id}</div>
-                              <div className="text-xs text-slate-900 font-mono font-bold mt-0.5">
+                              <div className="font-normal text-black text-sm">#{earning.id}</div>
+                              <div className="text-xs text-black font-mono font-normal mt-0.5">
                                 Ref: #{earning.booking_id}
                               </div>
                             </td>
 
                             <td className="p-4">
-                              <div className="font-extrabold text-slate-900 text-sm">
+                              <div className="font-normal text-black text-sm">
                                 {earning.hotel_name || 'Hotel Property'}
                               </div>
-                              <div className="text-[11px] text-slate-600 font-semibold mt-0.5">
+                              <div className="text-[11px] text-black font-normal mt-0.5">
                                 Host: {earning.host_name || 'Owner'}
                               </div>
                               {earning.host_email && (
-                                <div className="text-[10px] text-slate-900 font-mono font-bold">
+                                <div className="text-[10px] text-black font-mono font-normal">
                                   {earning.host_email}
                                 </div>
                               )}
                             </td>
 
                             <td className="p-4">
-                              <div className="font-bold text-slate-900">{earning.guest_name || 'Guest'}</div>
-                              <div className="text-[10px] text-slate-900 font-medium font-mono">
+                              <div className="font-normal text-black">{earning.guest_name || 'Guest'}</div>
+                              <div className="text-[10px] text-black font-normal font-mono">
                                 In: {formatDisplayDate(earning.check_in)} • Out: {formatDisplayDate(earning.check_out)}
                               </div>
                             </td>
@@ -3523,11 +3454,11 @@ const AdminDashboard = () => {
                               )}
                             </td>
 
-                            <td className="p-4 font-black text-slate-900 text-sm">
+                            <td className="p-4 font-normal text-black text-sm">
                               ₹{parseFloat(earning.gross_amount).toFixed(2)}
                             </td>
 
-                            <td className="p-4 text-amber-700 font-bold">
+                            <td className="p-4 text-black font-normal">
                               -₹{parseFloat(earning.platform_fee).toFixed(2)}
                             </td>
 
@@ -4092,7 +4023,7 @@ const AdminDashboard = () => {
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[1250px] text-left border-collapse">
                   <thead>
-                    <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-extrabold text-slate-600 uppercase tracking-wider whitespace-nowrap">
+                    <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-900 uppercase tracking-wider whitespace-nowrap">
                       <th className="py-3.5 px-4 whitespace-nowrap">Booking / Dates</th>
                       <th className="py-3.5 px-4 whitespace-nowrap">Customer Details</th>
                       <th className="py-3.5 px-4 whitespace-nowrap">Hotel Property</th>
@@ -4105,7 +4036,7 @@ const AdminDashboard = () => {
                       <th className="py-3.5 px-4 text-right whitespace-nowrap">Refund Action</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100 text-xs font-medium">
+                  <tbody className="divide-y divide-slate-100 text-xs font-normal text-black">
                     {refundFilteredBookings.length === 0 ? (
                       <tr>
                         <td colSpan="10" className="py-12 text-center text-slate-900 font-bold">
@@ -4141,34 +4072,34 @@ const AdminDashboard = () => {
                         return (
                           <tr key={b.id} className="hover:bg-slate-50/80 transition-colors whitespace-nowrap">
                             <td className="py-3.5 px-4 font-mono">
-                              <span className="font-bold text-slate-900">#{b.id}</span>
-                              <div className="text-[11px] text-slate-900 font-semibold font-sans mt-0.5">
+                              <span className="font-normal text-black">#{b.id}</span>
+                              <div className="text-[11px] text-black font-normal font-sans mt-0.5">
                                 {b.check_in} → {b.check_out}
                               </div>
                             </td>
 
                             <td className="py-3.5 px-4">
-                              <div className="font-bold text-slate-900">{refDetails.customer_name}</div>
-                              <div className="text-xs text-slate-900 font-bold">{b.user_email || b.guest_email || '—'}</div>
+                              <div className="font-normal text-black">{refDetails.customer_name}</div>
+                              <div className="text-xs text-black font-normal">{b.user_email || b.guest_email || '—'}</div>
                               {(b.guest_phone || b.user_phone) && (
-                                <div className="text-[11px] text-slate-900 font-mono font-bold">{b.guest_phone || b.user_phone}</div>
+                                <div className="text-[11px] text-black font-mono font-normal">{b.guest_phone || b.user_phone}</div>
                               )}
                             </td>
 
                             <td className="py-3.5 px-4">
-                              <div className="font-bold text-slate-800">{b.hotel_name || b.hotel_details?.name || 'Hotel Property'}</div>
-                              <div className="text-[11px] text-slate-900 font-semibold">{b.room_type_name || b.room_details?.name || 'Standard Room'}</div>
+                              <div className="font-normal text-black">{b.hotel_name || b.hotel_details?.name || 'Hotel Property'}</div>
+                              <div className="text-[11px] text-black font-normal">{b.room_type_name || b.room_details?.name || 'Standard Room'}</div>
                             </td>
 
-                            <td className="py-3.5 px-4 font-mono font-bold text-slate-700">
+                            <td className="py-3.5 px-4 font-mono font-normal text-black">
                               ₹{grossAmt.toFixed(2)}
                             </td>
 
-                            <td className="py-3.5 px-4 font-mono font-medium text-amber-700">
+                            <td className="py-3.5 px-4 font-mono font-normal text-black">
                               {feeAmt > 0 ? `-₹${feeAmt.toFixed(2)}` : '₹0.00'}
                             </td>
 
-                            <td className="py-3.5 px-4 font-mono font-black text-emerald-700 text-sm">
+                            <td className="py-3.5 px-4 font-mono font-normal text-black text-sm">
                               ₹{refundAmt.toFixed(2)}
                             </td>
 
@@ -4358,7 +4289,7 @@ const AdminDashboard = () => {
             <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-50 text-slate-900 font-black uppercase tracking-wider border-b border-slate-200">
+                  <thead className="bg-slate-50 text-slate-900 font-bold uppercase tracking-wider border-b border-slate-200">
                     <tr>
                       <th className="p-4">Booking ID</th>
                       <th className="p-4">Customer Email</th>
@@ -4370,10 +4301,10 @@ const AdminDashboard = () => {
                       <th className="p-4">Paid / Attempt At</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
+                  <tbody className="divide-y divide-slate-100 font-normal text-black">
                     {filteredPayments.length === 0 ? (
                       <tr>
-                        <td colSpan="8" className="p-8 text-center text-slate-900 font-black">No payment records matching the selected filter.</td>
+                        <td colSpan="8" className="p-8 text-center text-black font-normal">No payment records matching the selected filter.</td>
                       </tr>
                     ) : (
                       filteredPayments.slice((adminPaymentsPage - 1) * 10, adminPaymentsPage * 10).map((p) => {
@@ -4384,25 +4315,25 @@ const AdminDashboard = () => {
 
                         return (
                           <tr key={p.id} className={`hover:bg-slate-50/80 transition-colors ${p.has_multiple_captured ? 'bg-amber-50/60' : ''}`}>
-                            <td className="p-4 font-mono font-black text-slate-900 text-sm">
+                            <td className="p-4 font-mono font-normal text-black text-sm">
                               #{p.booking_id}
                               {p.attempts_count > 1 && (
-                                <span className="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">
+                                <span className="ml-2 px-2 py-0.5 rounded-full text-[10px] font-normal bg-slate-100 text-slate-600 border border-slate-200">
                                   {p.attempts_count} orders
                                 </span>
                               )}
                             </td>
-                            <td className="p-4 text-slate-900 font-bold">
+                            <td className="p-4 text-black font-normal">
                               {p.user_email || `User #${p.user_id}`}
                               {p.hotel_name && (
-                                <div className="text-[10px] text-slate-900 font-medium truncate max-w-[180px]">
+                                <div className="text-[10px] text-black font-normal truncate max-w-[180px]">
                                   {p.hotel_name}
                                 </div>
                               )}
                             </td>
-                            <td className="p-4 font-mono text-[11px] text-slate-900 font-semibold">{p.razorpay_order_id || 'N/A'}</td>
-                            <td className="p-4 font-mono text-[11px] text-slate-900 font-semibold">{p.razorpay_payment_id || 'N/A'}</td>
-                            <td className="p-4 text-slate-900 font-black text-sm">
+                            <td className="p-4 font-mono text-[11px] text-black font-normal">{p.razorpay_order_id || 'N/A'}</td>
+                            <td className="p-4 font-mono text-[11px] text-black font-normal">{p.razorpay_payment_id || 'N/A'}</td>
+                            <td className="p-4 text-black font-normal text-sm">
                               ₹{parseFloat(p.amount).toFixed(2)}
                             </td>
                             <td className="p-4">
@@ -4482,7 +4413,7 @@ const AdminDashboard = () => {
             <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
-                <thead className="bg-slate-50 text-slate-900 font-black uppercase tracking-wider border-b border-slate-200">
+                <thead className="bg-slate-50 text-slate-900 font-bold uppercase tracking-wider border-b border-slate-200">
                   <tr>
                     <th className="p-4">Promo Code</th>
                     <th className="p-4">Discount %</th>
@@ -4493,21 +4424,21 @@ const AdminDashboard = () => {
                     <th className="p-4 text-right">Actions</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
+                <tbody className="divide-y divide-slate-100 font-normal text-black">
                   {filteredCoupons.length === 0 ? (
                     <tr>
-                      <td colSpan="7" className="p-8 text-center text-slate-900 font-black">No promotional coupons created yet. Click 'Create Promo Coupon' above.</td>
+                      <td colSpan="7" className="p-8 text-center text-black font-normal">No promotional coupons created yet. Click 'Create Promo Coupon' above.</td>
                     </tr>
                   ) : (
                     filteredCoupons.slice((adminCouponsPage - 1) * 10, adminCouponsPage * 10).map((c) => (
                       <tr key={c.id} className="hover:bg-slate-50/80 transition-colors">
-                        <td className="p-4 font-mono font-black text-red-600 text-sm flex items-center gap-1.5">
-                          <Tag className="w-4 h-4 text-red-600" /> {c.code}
+                        <td className="p-4 font-mono font-normal text-black text-sm flex items-center gap-1.5">
+                          <Tag className="w-4 h-4 text-slate-600" /> {c.code}
                         </td>
-                        <td className="p-4 font-bold text-slate-900">{c.discount_percentage}% OFF</td>
-                        <td className="p-4 font-bold text-slate-700">₹{c.max_discount_amount}</td>
-                        <td className="p-4 text-slate-900 font-bold">₹{c.min_booking_amount}</td>
-                        <td className="p-4 text-slate-900 font-mono font-bold text-[11px]">{c.valid_from} → {c.valid_until}</td>
+                        <td className="p-4 font-normal text-black">{c.discount_percentage}% OFF</td>
+                        <td className="p-4 font-normal text-black">₹{c.max_discount_amount}</td>
+                        <td className="p-4 text-black font-normal">₹{c.min_booking_amount}</td>
+                        <td className="p-4 text-black font-mono font-normal text-[11px]">{c.valid_from} → {c.valid_until}</td>
                         <td className="p-4">
                           {c.is_active ? (
                             <span className="px-2.5 py-0.5 rounded-md text-[10px] font-black bg-emerald-50 text-emerald-700 border border-emerald-200">Active</span>
@@ -5825,6 +5756,159 @@ const AdminDashboard = () => {
                 </div>
               );
             })()}
+
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: MONTHLY RESERVATIONS & ORDERS BREAKDOWN */}
+      {selectedMonthAnalytics && (
+        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white card-white max-w-5xl w-full p-6 space-y-5 rounded-3xl shadow-2xl border border-slate-200 text-xs max-h-[90vh] flex flex-col animate-in fade-in zoom-in-95 duration-150">
+            
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-700 shadow-xs">
+                  <CalendarCheck className="w-5 h-5 text-[#D4AF37]" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-slate-900">
+                    {selectedMonthAnalytics.month} — Orders & Reservations Directory
+                  </h3>
+                  <p className="text-[11px] text-slate-500 font-semibold">
+                    Showing all guest reservations recorded in {selectedMonthAnalytics.month}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedMonthAnalytics(null)}
+                className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-900 flex items-center justify-center text-base font-bold cursor-pointer transition-all"
+                title="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Quick KPI Summary Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 shrink-0">
+              <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200">
+                <span className="text-[10px] font-bold text-slate-500 uppercase block">Total Bookings</span>
+                <span className="text-xl font-black text-slate-900">{selectedMonthAnalytics.bookings.length} Stays</span>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-emerald-50/70 border border-emerald-200">
+                <span className="text-[10px] font-bold text-emerald-700 uppercase block">Confirmed / Completed</span>
+                <span className="text-xl font-black text-emerald-800">{selectedMonthAnalytics.confirmedCount} Stays</span>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-amber-50/70 border border-amber-200">
+                <span className="text-[10px] font-bold text-amber-700 uppercase block">Gross Booking Volume</span>
+                <span className="text-xl font-black text-amber-900">₹{selectedMonthAnalytics.revenue.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+              </div>
+            </div>
+
+            {/* Bookings Table */}
+            <div className="flex-1 overflow-y-auto border border-slate-200 rounded-2xl min-h-[220px]">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 text-slate-900 font-bold uppercase tracking-wider border-b border-slate-200 sticky top-0 z-10 shadow-2xs">
+                  <tr>
+                    <th className="p-3">Booking ID</th>
+                    <th className="p-3">Guest Details</th>
+                    <th className="p-3">Hotel Property</th>
+                    <th className="p-3">Stay Dates</th>
+                    <th className="p-3">Total Amount</th>
+                    <th className="p-3">Booking Status</th>
+                    <th className="p-3">Payment Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-normal text-black">
+                  {selectedMonthAnalytics.bookings.length === 0 ? (
+                    <tr>
+                      <td colSpan="7" className="p-12 text-center text-slate-500">
+                        <CalendarCheck className="w-10 h-10 text-slate-300 mx-auto mb-2 opacity-60" />
+                        <p className="font-bold text-sm text-slate-700">No Orders in {selectedMonthAnalytics.month}</p>
+                        <p className="text-xs text-slate-400 mt-0.5">There were no customer reservations recorded during this month.</p>
+                      </td>
+                    </tr>
+                  ) : (
+                    selectedMonthAnalytics.bookings.map((b) => (
+                      <tr key={b.id} className="hover:bg-slate-50/80 transition-colors">
+                        <td className="p-3 font-mono">
+                          <div className="font-normal text-black text-xs">#{b.id}</div>
+                          {b.booking_id && <div className="text-[10px] text-slate-600 font-mono mt-0.5">{b.booking_id}</div>}
+                        </td>
+                        <td className="p-3">
+                          <div className="font-normal text-black">{b.guest_name || b.customer_name || 'Guest'}</div>
+                          {b.guest_phone && (
+                            <div className="text-[10px] text-slate-600 font-mono">
+                              📞 {b.guest_phone}
+                            </div>
+                          )}
+                          {b.guest_email && <div className="text-[10px] text-slate-500 mt-0.5">{b.guest_email}</div>}
+                        </td>
+                        <td className="p-3">
+                          <div className="font-normal text-black">{b.hotel_details?.name || b.hotel_name || `Hotel #${b.hotel}`}</div>
+                          <div className="text-[10px] text-slate-600 mt-0.5">
+                            {b.room_details?.title || 'Room'} {b.room_number ? `• Unit: ${b.room_number}` : ''}
+                          </div>
+                        </td>
+                        <td className="p-3 text-black font-normal whitespace-nowrap text-xs">
+                          {formatDisplayDate(b.check_in)} <span className="text-slate-400">→</span> {formatDisplayDate(b.check_out)}
+                        </td>
+                        <td className="p-3 font-normal text-black font-mono">
+                          ₹{parseFloat(b.total_amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className="p-3">
+                          <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
+                            b.booking_status === 'CONFIRMED' || b.booking_status === 'CHECKED_OUT' || b.booking_status === 'CHECKED_IN'
+                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                              : b.booking_status === 'CANCELLED'
+                              ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                              : 'bg-slate-100 text-slate-700 border border-slate-200'
+                          }`}>
+                            {b.booking_status}
+                          </span>
+                        </td>
+                        <td className="p-3">
+                          <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
+                            b.payment_status === 'CONFIRMED' || b.payment_status === 'PAID'
+                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                              : b.payment_status === 'REFUNDED'
+                              ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                              : 'bg-amber-50 text-amber-700 border border-amber-200'
+                          }`}>
+                            {b.payment_status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="flex items-center justify-between pt-3 border-t border-slate-100 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedMonthAnalytics(null);
+                  handleSelectTab('BOOKINGS');
+                }}
+                className="py-2 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-xs"
+              >
+                <CalendarCheck className="w-3.5 h-3.5 text-amber-400" />
+                <span>Open in Full Reservations Table</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSelectedMonthAnalytics(null)}
+                className="py-2 px-5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 font-bold text-xs transition-all cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
 
           </div>
         </div>
