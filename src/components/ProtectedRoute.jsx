@@ -24,6 +24,8 @@ const ProtectedRoute = ({ children, allowedRoles = ['ADMIN', 'SUPER_ADMIN'] }) =
   const hasAccess = 
     user.is_superuser || 
     user.is_staff || 
+    user.isStaff ||
+    user.role === 'STAFF' ||
     (allowedRoles && allowedRoles.includes(user.role));
 
   if (!hasAccess) {

@@ -16,11 +16,13 @@ import Sidebar from '../components/Sidebar';
 import NotificationBell from '../components/NotificationBell';
 import Pagination from '../components/Pagination';
 import SupportTicketsManagement from '../components/SupportTicketsManagement';
+import AdminStaffManagement from '../components/AdminStaffManagement';
 
 const TAB_TO_SLUG = {
   OVERVIEW: 'overview',
   HOTELS: 'hotels',
   USERS: 'users',
+  STAFF: 'staff',
   BOOKINGS: 'bookings',
   SETTLEMENTS: 'settlements',
   REFUNDS: 'refunds',
@@ -36,6 +38,9 @@ const SLUG_TO_TAB = {
   properties: 'HOTELS',
   users: 'USERS',
   roles: 'USERS',
+  staff: 'STAFF',
+  employees: 'STAFF',
+  team: 'STAFF',
   bookings: 'BOOKINGS',
   reservations: 'BOOKINGS',
   settlements: 'SETTLEMENTS',
@@ -125,6 +130,7 @@ const AdminDashboard = () => {
   const [refundFilterStatus, setRefundFilterStatus] = useState('ALL'); // 'ALL' | 'PENDING' | 'AWAITING_OWNER' | 'REFUNDED' | 'FAILED'
   const [refundModeFilter, setRefundModeFilter] = useState('ALL'); // 'ALL' | 'ORIGINAL_SOURCE' | 'BANK_TRANSFER' | 'UPI'
   const [adminRefundsApiList, setAdminRefundsApiList] = useState([]);
+  const [syncingHeaderData, setSyncingHeaderData] = useState(false);
   const [syncingGatewayBookingId, setSyncingGatewayBookingId] = useState(null);
   const [retryingRefundBookingId, setRetryingRefundBookingId] = useState(null);
   const [fetchingBackendRefundDetails, setFetchingBackendRefundDetails] = useState(false);
@@ -289,6 +295,20 @@ const AdminDashboard = () => {
     }
   };
 
+  const handleSyncData = async () => {
+    if (syncingHeaderData) return;
+    setSyncingHeaderData(true);
+    try {
+      await fetchAdminData();
+      showToast('Live database records & payments synced successfully!', 'success');
+    } catch (err) {
+      console.error('Failed to sync live data:', err);
+      showToast('Failed to sync live data.', 'error');
+    } finally {
+      setSyncingHeaderData(false);
+    }
+  };
+
   const handleSaveHoldDays = async () => {
     const days = parseInt(editingHoldDays, 10);
     if (isNaN(days) || days < 0) {
@@ -442,22 +462,60 @@ const AdminDashboard = () => {
     }
   };
 
+  const refreshSettlementsOnly = async () => {
+    try {
+      const res = await api.get('/payments/settlements/');
+      const rawSettlements = res.data?.results || [];
+      setSettlementsList(rawSettlements);
+      if (res.data?.summary) setSettlementSummary(res.data.summary);
+      if (res.data?.hotels_summary) setHotelsSummary(res.data.hotels_summary);
+    } catch (e) {
+      console.warn('Background settlements refresh failed:', e);
+    }
+  };
+
   const handleToggleDispute = async (earning, shouldDispute, reasonText = '') => {
+    if (!earning) {
+      showToast('No settlement record selected.', 'error');
+      return;
+    }
+    setSavingDispute(true);
+    const earningId = earning?.id || earning?.earning_id || earning;
     try {
       const res = await api.post('/payments/admin/earnings/toggle-dispute/', {
-        earning_id: earning.id,
+        earning_id: earningId,
         is_disputed: shouldDispute,
+        dispute_reason: reasonText,
         reason: reasonText
       });
-      showToast(res.data.message || (shouldDispute ? 'Dispute hold placed.' : 'Dispute hold released.'), 'success');
+
+      // Immediate local state update for instant UI response (<100ms)
+      const updatedEarning = res.data?.earning;
+      setSettlementsList(prev => prev.map(s => {
+        if (s.id === earningId || String(s.booking_id) === String(earning?.booking_id) || String(s.booking) === String(earning?.booking)) {
+          return updatedEarning ? { ...s, ...updatedEarning } : {
+            ...s,
+            is_disputed: shouldDispute,
+            status: shouldDispute ? 'DISPUTED' : 'ON_HOLD',
+            dispute_reason: shouldDispute ? reasonText : ''
+          };
+        }
+        return s;
+      }));
+
+      showToast(res.data?.message || (shouldDispute ? 'Dispute hold placed. Notice sent to hotel owner.' : 'Dispute hold released & unlocked.'), 'success');
       setShowDisputeModal(false);
       setSelectedEarningForDispute(null);
       setDisputeReason('');
-      fetchAdminData();
+      setSavingDispute(false);
+
+      // Non-blocking background sync without full-screen loading spinner
+      refreshSettlementsOnly();
     } catch (err) {
       console.error('Toggle dispute error:', err);
       const parsed = parseApiError(err, 'Failed to update dispute status.');
       showToast(parsed.message, 'error');
+      setSavingDispute(false);
     }
   };
 
@@ -897,32 +955,13 @@ const AdminDashboard = () => {
     };
   };
 
-  const getOwnerApproval = (bookingId) => {
-    try {
-      const existing = JSON.parse(localStorage.getItem('bmr_owner_cancellation_approvals') || '{}');
-      if (!bookingId) return null;
-      if (typeof bookingId === 'object') {
-        const keys = [
-          bookingId.id,
-          bookingId.booking_id,
-          bookingId.booking_reference,
-          bookingId.reference_id,
-          bookingId.booking
-        ].filter(Boolean).map(String);
-        for (const k of keys) {
-          const clean = k.replace(/^#/, '');
-          if (existing[k] || existing[clean] || existing[`#${clean}`]) {
-            return existing[k] || existing[clean] || existing[`#${clean}`];
-          }
-        }
-        return null;
-      }
-      const raw = String(bookingId);
-      const clean = raw.replace(/^#/, '');
-      return existing[raw] || existing[clean] || existing[`#${clean}`] || null;
-    } catch (e) {
-      return null;
+  const getOwnerApproval = (bookingOrId) => {
+    if (!bookingOrId) return null;
+    if (typeof bookingOrId === 'object') {
+      const oStatus = bookingOrId.owner_approval_status || bookingOrId.cancellation_breakdown?.owner_approval?.status;
+      if (oStatus) return { status: String(oStatus).toUpperCase() };
     }
+    return null;
   };
 
   const checkOwnerApprovalStatus = (b) => {
@@ -987,6 +1026,10 @@ const AdminDashboard = () => {
     const ownerStatus = checkOwnerApprovalStatus(selectedRefundBooking);
     if (ownerStatus === 'REJECTED') {
       showToast('⚠️ Hotel owner has rejected this customer cancellation. Super Admin cannot process refund for rejected cancellations.', 'error');
+      return;
+    }
+    if (ownerStatus !== 'APPROVED') {
+      showToast('⚠️ Hotel owner must approve this customer cancellation before Super Admin can process the refund.', 'warning');
       return;
     }
 
@@ -1178,9 +1221,7 @@ const AdminDashboard = () => {
     if (targetBooking) {
       targetBooking = {
         ...targetBooking,
-        owner_approval_status: 'APPROVED',
-        cancellation_status: 'OWNER_APPROVED',
-        status: targetBooking.status === 'OWNER_REJECTED' ? targetBooking.status : 'OWNER_APPROVED',
+        owner_approval_status: targetBooking.owner_approval_status || checkOwnerApprovalStatus(targetBooking),
         settlement_id: earning.id,
         _source_earning_id: earning.id,
         _source_earning_booking_id: earning.booking_id,
@@ -1198,7 +1239,7 @@ const AdminDashboard = () => {
         total_amount: parseFloat(earning.gross_amount || 0),
         refund_amount: parseFloat(earning.gross_amount || 0) * 0.9,
         cancellation_fee: parseFloat(earning.gross_amount || 0) * 0.1,
-        owner_approval_status: 'APPROVED',
+        owner_approval_status: checkOwnerApprovalStatus(earning),
         booking_status: 'CANCELLED',
         payment_status: 'REFUND_PENDING',
         status: 'OWNER_APPROVED',
@@ -1208,13 +1249,6 @@ const AdminDashboard = () => {
         _source_earning_booking: earning.booking
       };
     }
-
-    try {
-      const existingApprovals = JSON.parse(localStorage.getItem('bmr_owner_cancellation_approvals') || '{}');
-      existingApprovals[rawBId] = { status: 'APPROVED', updated_at: new Date().toISOString() };
-      existingApprovals[cleanBId] = { status: 'APPROVED', updated_at: new Date().toISOString() };
-      localStorage.setItem('bmr_owner_cancellation_approvals', JSON.stringify(existingApprovals));
-    } catch (e) {}
 
     // API 4: GET /api/payments/refunds/{booking_id}/
     setFetchingBackendRefundDetails(true);
@@ -1405,48 +1439,63 @@ const AdminDashboard = () => {
   }, [searchParams, hotelsSummary.length]);
 
   const handleExportCSV = () => {
-    let csvContent = 'data:text/csv;charset=utf-8,';
-    if (activeTab === 'SETTLEMENTS') {
-      csvContent += 'Settlement ID,Booking ID,Hotel Name,Host Name,Host Email,Destination,Gross Amount,Platform Commission,Net Payable,Hold Until,Status\n';
-      settlementsList.forEach(s => {
-        csvContent += `"${s.id}","${s.booking_id}","${s.hotel_name || ''}","${s.host_name || ''}","${s.host_email || ''}","${s.destination_summary || ''}","${s.gross_amount}","${s.platform_fee}","${s.net_amount}","${s.hold_until || ''}","${s.status}"\n`;
-      });
-    } else if (activeTab === 'PAYMENTS') {
-      csvContent += 'Booking ID,Customer Email,Razorpay Order ID,Payment ID,Amount,Status,Paid At\n';
-      paymentsList.forEach(p => {
-        csvContent += `"${p.booking_id}","${p.user_email || ''}","${p.razorpay_order_id || ''}","${p.razorpay_payment_id || ''}","${p.amount}","${p.status}","${p.paid_at || ''}"\n`;
-      });
-    } else if (activeTab === 'HOTELS') {
-      csvContent += 'Hotel Name,Owner Name,Owner Email,Owner Phone,City,Star Rating,Starting Price,Status\n';
-      hotelsList.forEach(h => {
-        csvContent += `"${h.name}","${h.owner_name || ''}","${h.owner_email || ''}","${h.owner_phone || ''}","${h.city}","${h.star_rating}","${h.starting_price}","${h.status}"\n`;
-      });
-    } else if (activeTab === 'BOOKINGS') {
-      csvContent += 'Booking ID,Guest Name,Hotel Name,Owner Name,Check In,Check Out,Total Amount,Booking Status,Payment Status\n';
-      bookingsList.forEach(b => {
-        csvContent += `"${b.id}","${b.guest_name || b.customer_name || ''}","${b.hotel_details?.name || ''}","${b.hotel_details?.owner_name || ''}","${b.check_in}","${b.check_out}","${b.total_amount}","${b.booking_status}","${b.payment_status}"\n`;
-      });
-    } else if (activeTab === 'USERS') {
-      csvContent += 'User ID,Username,Email,First Name,Last Name,Role,Status,Phone\n';
-      usersList.forEach(u => {
-        csvContent += `"${u.id}","${u.username}","${u.email}","${u.first_name || ''}","${u.last_name || ''}","${u.role}","${u.is_blocked ? 'Blocked' : 'Active'}","${u.phone_number || ''}"\n`;
-      });
-    } else if (activeTab === 'REFUNDS') {
-      csvContent += 'Booking ID,Customer Name,Hotel Name,Total Amount,Cancellation Fee,Refund Amount,Refund Method,Masked Account,IFSC,Owner Approval,Refund Status\n';
-      refundFilteredBookings.forEach(b => {
-        csvContent += `"${b.id}","${b.guest_name || b.customer_name || b.user_name || ''}","${b.hotel_name || b.hotel_details?.name || ''}","${b.total_amount || b.total_price || ''}","${b.cancellation_fee || b.cancellation_charge || '0.00'}","${b.refund_amount || '0.00'}","${b.refund_method || 'ORIGINAL_SOURCE'}","${maskBankAcc(b.refund_bank_details?.account_number || b.bank_details?.account_number)}","${b.refund_bank_details?.ifsc_code || b.bank_details?.ifsc_code || ''}","${b.status === 'OWNER_APPROVED' ? 'APPROVED' : (b.owner_approval_status || 'PENDING')}","${b.refund_status || b.status}"\n`;
-      });
-    } else {
-      showToast('Export available for Settlements, Refunds, Payments, Hotels, Users & Bookings tabs.', 'info');
-      return;
+    try {
+      let csvContent = '\uFEFF'; // Prepend UTF-8 BOM for full Excel / international character compatibility
+
+      if (activeTab === 'SETTLEMENTS') {
+        csvContent += 'Settlement ID,Booking ID,Hotel Name,Host Name,Host Email,Destination,Gross Amount,Platform Commission,Net Payable,Hold Until,Status\n';
+        settlementsList.forEach(s => {
+          csvContent += `"${s.id}","${s.booking_id}","${s.hotel_name || ''}","${s.host_name || ''}","${s.host_email || ''}","${s.destination_summary || ''}","${s.gross_amount}","${s.platform_fee}","${s.net_amount}","${s.hold_until || ''}","${s.status}"\n`;
+        });
+      } else if (activeTab === 'PAYMENTS') {
+        csvContent += 'Booking ID,Customer Email,Razorpay Order ID,Payment ID,Amount,Status,Paid At\n';
+        paymentsList.forEach(p => {
+          csvContent += `"${p.booking_id}","${p.user_email || ''}","${p.razorpay_order_id || ''}","${p.razorpay_payment_id || ''}","${p.amount}","${p.status}","${p.paid_at || ''}"\n`;
+        });
+      } else if (activeTab === 'HOTELS') {
+        csvContent += 'Hotel Name,Owner Name,Owner Email,Owner Phone,City,Star Rating,Starting Price,Status\n';
+        hotelsList.forEach(h => {
+          csvContent += `"${h.name}","${h.owner_name || ''}","${h.owner_email || ''}","${h.owner_phone || ''}","${h.city}","${h.star_rating}","${h.starting_price}","${h.status}"\n`;
+        });
+      } else if (activeTab === 'BOOKINGS') {
+        csvContent += 'Booking ID,Guest Name,Hotel Name,Owner Name,Check In,Check Out,Total Amount,Booking Status,Payment Status\n';
+        bookingsList.forEach(b => {
+          csvContent += `"${b.id}","${b.guest_name || b.customer_name || ''}","${b.hotel_details?.name || ''}","${b.hotel_details?.owner_name || ''}","${b.check_in}","${b.check_out}","${b.total_amount}","${b.booking_status}","${b.payment_status}"\n`;
+        });
+      } else if (activeTab === 'USERS') {
+        csvContent += 'User ID,Username,Email,First Name,Last Name,Role,Status,Phone\n';
+        usersList.forEach(u => {
+          csvContent += `"${u.id}","${u.username}","${u.email}","${u.first_name || ''}","${u.last_name || ''}","${u.role}","${u.is_blocked ? 'Blocked' : 'Active'}","${u.phone_number || ''}"\n`;
+        });
+      } else if (activeTab === 'REFUNDS') {
+        csvContent += 'Booking ID,Customer Name,Hotel Name,Total Amount,Cancellation Fee,Refund Amount,Refund Method,Masked Account,IFSC,Owner Approval,Refund Status\n';
+        refundFilteredBookings.forEach(b => {
+          csvContent += `"${b.id}","${b.guest_name || b.customer_name || b.user_name || ''}","${b.hotel_name || b.hotel_details?.name || ''}","${b.total_amount || b.total_price || ''}","${b.cancellation_fee || b.cancellation_charge || '0.00'}","${b.refund_amount || '0.00'}","${b.refund_method || 'ORIGINAL_SOURCE'}","${maskBankAcc(b.refund_bank_details?.account_number || b.bank_details?.account_number)}","${b.refund_bank_details?.ifsc_code || b.bank_details?.ifsc_code || ''}","${b.status === 'OWNER_APPROVED' ? 'APPROVED' : (b.owner_approval_status || 'PENDING')}","${b.refund_status || b.status}"\n`;
+        });
+      } else {
+        showToast('Export available for Settlements, Refunds, Payments, Hotels, Users & Bookings tabs.', 'info');
+        return;
+      }
+
+      // Robust Blob creation with Object URL (avoids Data URI browser URL length limits)
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.setAttribute('download', `superadmin_${activeTab.toLowerCase()}_report_${new Date().toISOString().split('T')[0]}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      setTimeout(() => {
+        URL.revokeObjectURL(objectUrl);
+      }, 1000);
+
+      showToast(`Exported ${activeTab.toLowerCase()} CSV successfully!`, 'success');
+    } catch (err) {
+      console.error('Failed to export CSV report:', err);
+      showToast('Failed to export CSV report. Please try again.', 'error');
     }
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `superadmin_${activeTab.toLowerCase()}_report.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
   };
 
   // Stats calculation
@@ -1542,9 +1591,6 @@ const AdminDashboard = () => {
     // Status filter
     if (paymentStatusFilter !== 'ALL') {
       list = list.filter(p => p.status === paymentStatusFilter);
-    } else {
-      // By default in 'ALL', only show actual payment transactions and exclude orphan unpaid/testing CREATED attempts
-      list = list.filter(p => p.status !== 'CREATED');
     }
 
     // Search query filter
@@ -1557,7 +1603,7 @@ const AdminDashboard = () => {
       );
     }
 
-    // Group by booking_id: pick primary successful (CAPTURED/REFUNDED) payment, eliminating any orphan CREATED rows
+    // Group by booking_id: pick primary successful (CAPTURED/REFUNDED/FAILED/CREATED) payment
     const groups = new Map();
     list.forEach(p => {
       const bKey = p.booking_id || p.booking || `nobooking_${p.id}`;
@@ -1569,11 +1615,12 @@ const AdminDashboard = () => {
 
     const summary = [];
     groups.forEach((items) => {
-      // Priority: CAPTURED > REFUNDED > FAILED > CREATED
+      // Priority: CAPTURED > REFUNDED > FAILED > CREATED > first attempt
       const captured = items.find(i => i.status === 'CAPTURED');
       const refunded = items.find(i => i.status === 'REFUNDED' || i.status === 'PARTIALLY_REFUNDED');
       const failed = items.find(i => i.status === 'FAILED');
-      const primary = captured || refunded || failed || (paymentStatusFilter === 'CREATED' ? items[0] : null);
+      const created = items.find(i => i.status === 'CREATED');
+      const primary = captured || refunded || failed || created || items[0];
 
       if (primary) {
         summary.push({
@@ -1617,12 +1664,13 @@ const AdminDashboard = () => {
     );
   });
   const filteredBookings = bookingsList.filter(b => {
-    if (b.booking_status === 'PENDING_PAYMENT' && b.payment_status === 'PENDING') return false;
-
     if (!q) return true;
     const hotelName = b.hotel_details?.name?.toLowerCase() || '';
     const ownerName = b.hotel_details?.owner_name?.toLowerCase() || '';
     const bookingId = (b.booking_id || b.id?.toString() || '')?.toLowerCase();
+    const guestName = (b.guest_name || b.customer_name || b.user_name || '')?.toLowerCase();
+    const guestEmail = (b.guest_email || b.user_email || b.customer_email || '')?.toLowerCase();
+    const guestPhone = (b.guest_phone || b.customer_phone || '')?.toString().toLowerCase();
     const status = (b.booking_status || '')?.toLowerCase();
     const payStatus = (b.payment_status || '')?.toLowerCase();
 
@@ -1662,7 +1710,7 @@ const AdminDashboard = () => {
     const tpStatus = (tBooking?.payment_status || '').toUpperCase();
     const trStatus = (tBooking?.refund_status || '').toUpperCase();
 
-    if (eStat === 'REFUNDED' || ebStat === 'REFUNDED' || tbStatus === 'REFUNDED' || tpStatus === 'REFUNDED' || trStatus === 'REFUNDED') {
+    if (eStat === 'REFUNDED' || ebStat === 'REFUNDED' || tbStatus === 'REFUNDED' || tpStatus === 'REFUNDED' || trStatus === 'REFUNDED' || trStatus === 'PROCESSED') {
       return true;
     }
 
@@ -1681,7 +1729,9 @@ const AdminDashboard = () => {
 
       const isFoundInBackendRefunds = adminRefundsApiList.some(r => {
         const rBookingId = String(r.booking_id || r.booking || r.id || '').replace(/^#/, '');
-        return candidateKeys.some(k => String(k).replace(/^#/, '') === rBookingId);
+        const matchesKey = candidateKeys.some(k => String(k).replace(/^#/, '') === rBookingId);
+        const rStatus = String(r.status || '').toUpperCase();
+        return matchesKey && (rStatus === 'PROCESSED' || rStatus === 'REFUNDED');
       });
       if (isFoundInBackendRefunds) return true;
     }
@@ -1691,13 +1741,16 @@ const AdminDashboard = () => {
   // Helper to determine if a stay/settlement is cancelled, reversed or refunded
   const isCancelledOrRefundedStay = (s) => {
     if (!s) return false;
+    // Administrative dispute holds on host earnings are NOT customer refund cancellations
+    if (s.is_disputed || (s.status || '').toUpperCase() === 'DISPUTED') return false;
+
     const tBooking = bookingsList.find(b => String(b.id) === String(s.booking_id || s.booking) || String(b.booking_id) === String(s.booking_id || s.booking));
     if (checkIsBookingRefunded(s, tBooking)) return true;
 
     const stat = (s.status || '').toUpperCase();
     const bStat = (s.booking_status || '').toUpperCase();
     if (stat === 'REVERSED' || stat === 'REFUNDED' || bStat === 'CANCELLED') return true;
-    if (s.is_eligible === false && stat !== 'PAID' && stat !== 'ON_HOLD') return true;
+    if (s.is_eligible === false && stat !== 'PAID' && stat !== 'ON_HOLD' && stat !== 'DISPUTED') return true;
 
     if (tBooking) {
       const tbStatus = (tBooking.status || tBooking.booking_status || '').toUpperCase();
@@ -1823,12 +1876,45 @@ const AdminDashboard = () => {
       const s = (b.status || b.booking_status || '').toUpperCase();
       const p = (b.payment_status || '').toUpperCase();
       const r = (b.refund_status || '').toUpperCase();
-      const hasRefundTag = b.refund_amount !== undefined || b.refund_bank_details || b.bank_details || b.cancellation_requested_at || b.cancellation_reason || b.owner_approval_status;
-      const isCancelState = ['CANCELLATION_REQUESTED', 'OWNER_APPROVED', 'OWNER_REJECTED', 'REFUND_PENDING', 'REFUND_PROCESSING', 'REFUNDED', 'REFUND_FAILED'].includes(s) ||
-                            ['REFUND_PENDING', 'REFUNDED', 'REFUND_PROCESSING'].includes(p) ||
-                            ['PENDING', 'PROCESSED', 'FAILED', 'REFUNDED', 'PROCESSING'].includes(r) ||
-                            (s === 'CANCELLED' && hasRefundTag);
-      return isCancelState || hasRefundTag;
+
+      // Explicit cancellation status on the booking
+      const isExplicitCancelStatus = [
+        'CANCELLATION_REQUESTED',
+        'OWNER_APPROVED',
+        'OWNER_REJECTED',
+        'REFUND_PENDING',
+        'REFUND_PROCESSING',
+        'REFUNDED',
+        'REFUND_FAILED'
+      ].includes(s);
+
+      // Explicit refund status on the payment
+      const isExplicitRefundPayment = ['REFUND_PENDING', 'REFUNDED', 'REFUND_PROCESSING', 'REFUND_FAILED'].includes(p);
+
+      // Explicit refund record from payment gateway / refunds table
+      const isExplicitRefundRecord = Boolean(r && ['PENDING', 'PROCESSED', 'FAILED', 'REFUNDED', 'PROCESSING'].includes(r));
+
+      // Explicit customer cancellation evidence
+      const hasCancellationEvidence = Boolean(
+        b.cancellation_requested_at ||
+        b.cancelled_at ||
+        (b.cancellation_reason && typeof b.cancellation_reason === 'string' && b.cancellation_reason.trim() !== '') ||
+        (b.cancellation_breakdown && typeof b.cancellation_breakdown === 'object' && Object.keys(b.cancellation_breakdown).length > 0)
+      );
+
+      // Cancelled booking that had a payment or cancellation record
+      const isPaidOrVerifiedCancelled = s === 'CANCELLED' && (p === 'PAID' || isExplicitRefundPayment || hasCancellationEvidence);
+
+      // Bookings that are normal active stays (CONFIRMED, CHECKED_IN, CHECKED_OUT, NO_SHOW, PENDING_PAYMENT)
+      // and have NO cancellation evidence or refund status must NEVER be shown as refund candidates
+      if (['CONFIRMED', 'CHECKED_IN', 'CHECKED_OUT', 'NO_SHOW', 'PENDING_PAYMENT', 'PENDING', 'COMPLETED'].includes(s) &&
+          !isExplicitRefundPayment &&
+          !isExplicitRefundRecord &&
+          !hasCancellationEvidence) {
+        return false;
+      }
+
+      return isExplicitCancelStatus || isExplicitRefundPayment || isExplicitRefundRecord || isPaidOrVerifiedCancelled || (hasCancellationEvidence && p === 'PAID');
     });
   })();
 
@@ -1907,10 +1993,11 @@ const AdminDashboard = () => {
       icon: Activity,
       items: [
         { id: 'OVERVIEW', label: 'Executive Overview', icon: Activity, badge: null },
-        { id: 'HOTELS', label: 'Hotels & Properties', icon: Building2, badge: hotelsList.length },
-        { id: 'USERS', label: 'Users & Roles', icon: Users, badge: usersList.length },
-        { id: 'BOOKINGS', label: 'Reservations & Stays', icon: CalendarCheck, badge: filteredBookings.length },
-        { id: 'TICKETS', label: 'Support Tickets', icon: MessageSquare, badge: 'Desk' },
+        { id: 'HOTELS', label: 'Hotels & Properties', icon: Building2, badge: null },
+        { id: 'USERS', label: 'Users & Roles', icon: Users, badge: null },
+        { id: 'STAFF', label: 'Staff Management', icon: ShieldCheck, badge: null },
+        { id: 'BOOKINGS', label: 'Reservations & Stays', icon: CalendarCheck, badge: null },
+        { id: 'TICKETS', label: 'Support Tickets', icon: MessageSquare, badge: null },
       ]
     },
     {
@@ -1918,19 +2005,51 @@ const AdminDashboard = () => {
       title: 'Finance & Escrow',
       icon: IndianRupee,
       items: [
-        { id: 'SETTLEMENTS', label: 'Host Settlements & Escrow', icon: Landmark, badge: liveEligibleCount > 0 ? `${liveEligibleCount} Payout Due` : null },
-        { id: 'REFUNDS', label: 'Customer Refunds', icon: RotateCcw, badge: pendingRefundsCount > 0 ? `${pendingRefundsCount} Due` : null },
-        { id: 'PAYMENTS', label: 'Payments Ledger', icon: CreditCard, badge: paymentsList.length },
-        { id: 'COUPONS', label: 'Promo Coupons', icon: Tag, badge: couponsList.length },
+        { id: 'SETTLEMENTS', label: 'Host Settlements & Escrow', icon: Landmark, badge: null },
+        { id: 'REFUNDS', label: 'Customer Refunds', icon: RotateCcw, badge: null },
+        { id: 'PAYMENTS', label: 'Payments Ledger', icon: CreditCard, badge: null },
+        { id: 'COUPONS', label: 'Promo Coupons', icon: Tag, badge: null },
       ]
     }
   ];
+
+  const refreshTabData = async (target) => {
+    try {
+      if (target === 'HOTELS') {
+        const res = await api.get('/hotels/?page_size=1000&sort_by=newest');
+        setHotelsList(res.data.results || res.data || []);
+      } else if (target === 'USERS') {
+        const res = await api.get('/users/all/');
+        setUsersList(res.data.results || res.data || []);
+      } else if (target === 'BOOKINGS') {
+        const res = await api.get('/bookings/?page_size=1000');
+        setBookingsList(res.data.results || res.data || []);
+      } else if (target === 'SETTLEMENTS') {
+        const res = await api.get('/payments/settlements/');
+        setSettlementsList(res.data?.results || []);
+        if (res.data?.summary) setSettlementSummary(res.data.summary);
+      } else if (target === 'REFUNDS') {
+        await fetchAdminRefundsApi();
+      } else if (target === 'PAYMENTS') {
+        const res = await api.get('/payments/admin/all/?page_size=1000');
+        setPaymentsList(res.data.results || res.data || []);
+      } else if (target === 'COUPONS') {
+        const res = await api.get('/coupons/');
+        setCouponsList(res.data.results || res.data || []);
+      } else if (target === 'OVERVIEW') {
+        fetchAdminData();
+      }
+    } catch (e) {
+      console.warn('Tab refresh error:', e);
+    }
+  };
 
   const handleSelectTab = (tabId, filter) => {
     setActiveTab(tabId);
     if (filter !== undefined && filter !== null) {
       setSearchQuery(filter);
     }
+    refreshTabData(tabId);
     const slug = TAB_TO_SLUG[tabId] || 'overview';
     navigate(`/dashboard/${slug}`);
   };
@@ -1938,38 +2057,54 @@ const AdminDashboard = () => {
   return (
     <div className="bg-[#F4F6F9] text-slate-900 min-h-screen flex font-sans select-none [&_input]:select-text [&_textarea]:select-text selection:bg-transparent selection:text-inherit">
       
-      {/* Permanent Desktop Sidebar */}
+      {/* Sidebar with Desktop & Mobile Drawer */}
       <Sidebar
         variant="luxury"
         menuGroups={adminMenuGroups}
         activeTab={activeTab}
         onSelectTab={handleSelectTab}
         onHeaderClick={() => handleSelectTab('OVERVIEW', '')}
+        mobileOpen={mobileSidebarOpen}
+        setMobileOpen={setMobileSidebarOpen}
         title="GoOnStay"
         subtitle=""
         badgeText="ADMIN PORTAL"
       />
 
-      {/* Main Desktop Content Workspace */}
+      {/* Main Content Workspace */}
       <div className="flex-1 min-w-0 flex flex-col bg-[#F4F6F9]">
         
-        {/* Top Desktop Sticky Header */}
-        <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200/90 px-8 py-3.5 flex items-center justify-between gap-4 shadow-xs">
-          <div className="flex items-center gap-3">
-            <div>
-              <div className="flex items-center gap-2.5">
-                <h1 className="text-lg font-black tracking-tight text-slate-900 uppercase flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-[#D4AF37] animate-pulse"></span>
-                  {activeTab === 'OVERVIEW' ? 'Executive Overview & Performance' :
-                   activeTab === 'HOTELS' ? 'Hotel Properties Control' :
-                   activeTab === 'USERS' ? 'User Accounts & Roles Directory' :
-                   activeTab === 'BOOKINGS' ? 'Reservations & Stays Register' :
-                   activeTab === 'SETTLEMENTS' ? 'Host Settlements & Escrow Management' :
-                   activeTab === 'REFUNDS' ? 'Customer Cancellation & Refund Processing' :
-                   activeTab === 'PAYMENTS' ? 'Razorpay Payments Ledger' :
-                   activeTab === 'TICKETS' ? 'Guest & Owner Support Desk' : 'Promo & Discount Coupons'}
+        {/* Top Sticky Header */}
+        <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200/90 px-3.5 sm:px-8 py-2.5 sm:py-3.5 flex items-center justify-between gap-2.5 sm:gap-4 shadow-xs">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+            {/* Mobile Hamburger Drawer Toggle Button */}
+            <button
+              type="button"
+              onClick={() => setMobileSidebarOpen(true)}
+              className="lg:hidden p-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors shrink-0 cursor-pointer"
+              title="Open Navigation Menu"
+              aria-label="Open Navigation Menu"
+            >
+              <Menu className="w-5 h-5 text-slate-800" />
+            </button>
+
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <h1 className="text-xs sm:text-base lg:text-lg font-black tracking-tight text-slate-900 uppercase flex items-center gap-1.5 sm:gap-2 truncate">
+                  <span className="w-2 h-2 rounded-full bg-[#D4AF37] animate-pulse shrink-0"></span>
+                  <span className="truncate">
+                    {activeTab === 'OVERVIEW' ? 'Executive Overview' :
+                     activeTab === 'HOTELS' ? 'Hotel Properties' :
+                     activeTab === 'USERS' ? 'Users & Roles' :
+                     activeTab === 'STAFF' ? 'Staff Management' :
+                     activeTab === 'BOOKINGS' ? 'Reservations & Stays' :
+                     activeTab === 'SETTLEMENTS' ? 'Host Settlements' :
+                     activeTab === 'REFUNDS' ? 'Customer Refunds' :
+                     activeTab === 'PAYMENTS' ? 'Payment Ledger' :
+                     activeTab === 'TICKETS' ? 'Support Desk' : 'Promo Coupons'}
+                  </span>
                 </h1>
-                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-50 text-amber-800 border border-amber-300 font-bold shadow-xs">
+                <span className="hidden md:inline-block px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-50 text-amber-800 border border-amber-300 font-bold shadow-xs shrink-0">
                   {activeTab}
                 </span>
               </div>
@@ -1977,7 +2112,7 @@ const AdminDashboard = () => {
           </div>
 
           {/* Luxury Top Header Search Bar */}
-          <div className="relative w-64 sm:w-80 lg:w-96 hidden md:block">
+          <div className="relative w-48 sm:w-72 lg:w-96 hidden lg:block">
             <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-600" />
             <input
               type="text"
@@ -1997,25 +2132,32 @@ const AdminDashboard = () => {
             )}
           </div>
 
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
             <NotificationBell />
+            {activeTab !== 'OVERVIEW' && (
+              <button
+                onClick={handleExportCSV}
+                className="py-1.5 sm:py-2 px-2.5 sm:px-3.5 rounded-xl bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 text-[11px] sm:text-xs font-bold transition-all shadow-xs inline-flex items-center justify-center gap-1 sm:gap-1.5 shrink-0 whitespace-nowrap leading-none cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                <span className="hidden sm:inline">Export CSV</span>
+                <span className="sm:hidden">CSV</span>
+              </button>
+            )}
             <button
-              onClick={handleExportCSV}
-              className="py-2 px-3.5 rounded-xl bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 text-xs font-bold transition-all shadow-xs inline-flex items-center justify-center gap-1.5 shrink-0 whitespace-nowrap leading-none cursor-pointer"
+              onClick={handleSyncData}
+              disabled={syncingHeaderData}
+              className="py-1.5 sm:py-2 px-2.5 sm:px-4 rounded-xl bg-gradient-to-r from-[#BF8E36] via-[#D8A74B] to-[#BF8E36] text-white font-black text-[11px] sm:text-xs transition-all shadow-sm hover:brightness-105 inline-flex items-center justify-center gap-1 sm:gap-1.5 shrink-0 whitespace-nowrap leading-none cursor-pointer disabled:opacity-75"
             >
-              <Download className="w-3.5 h-3.5 text-amber-600 shrink-0" /> Export CSV
-            </button>
-            <button
-              onClick={fetchAdminData}
-              className="py-2 px-4 rounded-xl bg-gradient-to-r from-[#BF8E36] via-[#D8A74B] to-[#BF8E36] text-white font-black text-xs transition-all shadow-sm hover:brightness-105 inline-flex items-center justify-center gap-1.5 shrink-0 whitespace-nowrap leading-none cursor-pointer"
-            >
-              <RefreshCw className="w-3.5 h-3.5 shrink-0" /> Sync Data
+              <RefreshCw className={`w-3.5 h-3.5 shrink-0 ${syncingHeaderData ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">{syncingHeaderData ? 'Syncing...' : 'Sync Data'}</span>
+              <span className="sm:hidden">{syncingHeaderData ? '...' : 'Sync'}</span>
             </button>
           </div>
         </header>
 
         {/* Main Body Content */}
-        <main className="max-w-7xl mx-auto w-full px-4 sm:px-8 pt-6 pb-6 space-y-7 flex-1 bg-[#F4F6F9]">
+        <main className="max-w-7xl mx-auto w-full px-3 sm:px-6 lg:px-8 pt-4 sm:pt-6 pb-8 space-y-5 sm:space-y-7 flex-1 bg-[#F4F6F9] overflow-x-hidden">
 
         {/* Payout Day Alert Banner: Only shows when a host has an actual mature payout due (> ₹0.00) */}
         {(activeTab === 'OVERVIEW' || activeTab === 'SETTLEMENTS') && liveEligibleCount > 0 && liveEligibleTotal > 0 && (
@@ -2098,10 +2240,7 @@ const AdminDashboard = () => {
                 <h3 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
                   {hotelsList.length}
                 </h3>
-                <div className="flex items-center justify-between mt-2 text-xs">
-                  <span className="text-emerald-600 font-extrabold flex items-center gap-0.5">
-                    ↗ +12%
-                  </span>
+                <div className="mt-2 text-xs">
                   <span className="text-slate-900 font-bold text-[11px]">
                     {approvedHotelsCount} Live • {pendingHotelsCount} Pending
                   </span>
@@ -2124,10 +2263,7 @@ const AdminDashboard = () => {
                 <h3 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
                   {bookingsList.length.toLocaleString('en-IN')}
                 </h3>
-                <div className="flex items-center justify-between mt-2 text-xs">
-                  <span className="text-emerald-600 font-extrabold flex items-center gap-0.5">
-                    ↗ +18%
-                  </span>
+                <div className="mt-2 text-xs">
                   <span className="text-slate-900 font-bold text-[11px]">
                     {confirmedBookingsCount} Confirmed Stays
                   </span>
@@ -2150,10 +2286,7 @@ const AdminDashboard = () => {
                 <h3 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
                   {usersList.length.toLocaleString('en-IN')}
                 </h3>
-                <div className="flex items-center justify-between mt-2 text-xs">
-                  <span className="text-emerald-600 font-extrabold flex items-center gap-0.5">
-                    ↗ +15%
-                  </span>
+                <div className="mt-2 text-xs">
                   <span className="text-slate-900 font-bold text-[11px]">
                     {totalOwnersCount} Hotel Owners
                   </span>
@@ -2176,10 +2309,7 @@ const AdminDashboard = () => {
                 <h3 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
                   ₹{totalRevenue.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                 </h3>
-                <div className="flex items-center justify-between mt-2 text-xs">
-                  <span className="text-emerald-600 font-extrabold flex items-center gap-0.5">
-                    ↗ +22%
-                  </span>
+                <div className="mt-2 text-xs">
                   <span className="text-slate-900 font-bold text-[11px]">
                     {capturedPayments.length} Captured Stays
                   </span>
@@ -2216,9 +2346,6 @@ const AdminDashboard = () => {
                   <div className="flex items-center justify-between text-xs font-black text-slate-900 pb-2 border-b border-slate-200">
                     <span className="text-slate-900 font-extrabold flex items-center gap-1.5">
                       <BarChart3 className="w-4 h-4 text-[#D4AF37]" /> Monthly Gross Booking Volume (₹)
-                    </span>
-                    <span className="text-amber-700 font-bold text-[11px] bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
-                      Click any month to view all orders
                     </span>
                   </div>
 
@@ -2591,6 +2718,11 @@ const AdminDashboard = () => {
               theme="luxury"
             />
           </div>
+        )}
+
+        {/* TAB: STAFF MANAGEMENT (PHASE 1 UI) */}
+        {activeTab === 'STAFF' && (
+          <AdminStaffManagement />
         )}
 
         {/* TAB 3: USERS & ROLES MANAGEMENT */}
@@ -3553,7 +3685,17 @@ const AdminDashboard = () => {
 
                             <td className="p-4 text-right">
                               <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                                {isCancelledOrRefundedStay(earning) || earning.status === 'REVERSED' || earning.booking_status === 'CANCELLED' ? (
+                                {earning.is_disputed || earning.status === 'DISPUTED' ? (
+                                  <button
+                                    type="button"
+                                    disabled={savingDispute}
+                                    onClick={() => handleToggleDispute(earning, false)}
+                                    className="py-1 px-2.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white font-black text-[11px] transition-colors inline-flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap disabled:opacity-50"
+                                    title="Unlock dispute and release payout hold"
+                                  >
+                                    <Unlock className="w-3.5 h-3.5" /> Unlock / Release Hold
+                                  </button>
+                                ) : isCancelledOrRefundedStay(earning) || earning.status === 'REVERSED' || earning.booking_status === 'CANCELLED' ? (
                                   (() => {
                                     const tBooking = bookingsList.find(b => String(b.id) === String(earning.booking_id || earning.booking) || String(b.booking_id) === String(earning.booking_id || earning.booking));
                                     const tbStatus = (tBooking?.status || tBooking?.booking_status || '').toUpperCase();
@@ -3677,15 +3819,7 @@ const AdminDashboard = () => {
                                       </button>
                                     )}
 
-                                    {earning.is_disputed ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => handleToggleDispute(earning, false)}
-                                        className="py-1 px-2.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-900 font-black text-[11px] transition-colors inline-flex items-center gap-1 cursor-pointer"
-                                      >
-                                        Release Hold
-                                      </button>
-                                    ) : earning.status !== 'PAID' && !isEligible && (
+                                    {earning.status !== 'PAID' && (
                                       <button
                                         type="button"
                                         onClick={() => {
@@ -3693,9 +3827,9 @@ const AdminDashboard = () => {
                                           setDisputeReason('');
                                           setShowDisputeModal(true);
                                         }}
-                                        className="py-1 px-2.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold text-[11px] transition-colors inline-flex items-center gap-1 cursor-pointer"
+                                        className="py-1 px-2.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold text-[11px] transition-colors inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
                                       >
-                                        Hold / Dispute
+                                        <Lock className="w-3 h-3" /> Hold / Dispute
                                       </button>
                                     )}
                                   </>
@@ -4067,7 +4201,7 @@ const AdminDashboard = () => {
                         const refundAmt = parseFloat(b.refund_amount !== undefined ? b.refund_amount : (b.cancellation_quote?.refund_amount || (grossAmt * 0.9)));
                         const feeAmt = parseFloat(b.cancellation_fee !== undefined ? b.cancellation_fee : (b.cancellation_quote?.cancellation_fee || (grossAmt - refundAmt)));
                         const refDetails = resolveCustomerRefundDetails(b);
-                        const canProcess = (isOwnerApproved || !isOwnerRejected) && !isRefunded && !isProcessing;
+                        const canProcess = isOwnerApproved && !isRefunded && !isProcessing;
 
                         return (
                           <tr key={b.id} className="hover:bg-slate-50/80 transition-colors whitespace-nowrap">
@@ -4149,6 +4283,10 @@ const AdminDashboard = () => {
                               ) : isFailed ? (
                                 <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-extrabold bg-red-100 text-red-800 border border-red-300" title={b.refund_failure_reason}>
                                   <AlertTriangle className="w-3 h-3" /> FAILED
+                                </span>
+                              ) : isOwnerRejected ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-extrabold bg-rose-100 text-rose-800 border border-rose-300">
+                                  <XCircle className="w-3 h-3" /> REJECTED
                                 </span>
                               ) : isOwnerApproved ? (
                                 <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-extrabold bg-amber-100 text-amber-800 border border-amber-300">
@@ -4829,8 +4967,8 @@ const AdminDashboard = () => {
                   </span>
                 </div>
 
-                <div className="border border-slate-200 rounded-2xl overflow-hidden shadow-2xs max-h-60 overflow-y-auto">
-                  <table className="w-full text-left text-xs">
+                <div className="border border-slate-200 rounded-2xl overflow-auto shadow-2xs max-h-60">
+                  <table className="w-full text-left text-xs whitespace-nowrap">
                     <thead className="bg-slate-100/90 text-slate-700 font-black uppercase tracking-wider sticky top-0 border-b border-slate-200 text-[10px]">
                       <tr>
                         <th className="p-3">Hotel Property & Location</th>
@@ -5197,8 +5335,8 @@ const AdminDashboard = () => {
                   </span>
                 </div>
 
-                <div className="max-h-56 overflow-y-auto rounded-xl border border-slate-200 bg-white">
-                  <table className="w-full text-left text-[11px]">
+                <div className="max-h-56 overflow-auto rounded-xl border border-slate-200 bg-white">
+                  <table className="w-full text-left text-[11px] whitespace-nowrap">
                     <thead className="bg-slate-100 text-slate-700 uppercase font-bold sticky top-0 border-b border-slate-200">
                       <tr>
                         <th className="p-2">Hotel Property</th>
@@ -5279,37 +5417,55 @@ const AdminDashboard = () => {
               Enter reason for blocking payout for booking <strong className="font-mono text-slate-900">#{selectedEarningForDispute.booking_id}</strong> ({selectedEarningForDispute.hotel_name}):
             </p>
 
-            <div>
-              <label className="block text-[11px] font-black uppercase tracking-wider text-slate-800 mb-1">
-                Dispute / Investigation Reason <span className="text-rose-600">*</span>
-              </label>
-              <textarea
-                rows={3}
-                required
-                value={disputeReason}
-                onChange={(e) => setDisputeReason(e.target.value)}
-                placeholder="e.g. Guest reported unhygienic room condition under support ticket #12; pending inspection."
-                className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-medium outline-none focus:border-red-600 focus:bg-white text-xs"
-              ></textarea>
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-[11px] text-amber-900 font-medium">
+              📢 <strong>Hotel Owner Notice:</strong> The hotel owner will receive an immediate notification message informing them of this reason. You can unlock and release this hold directly from the dashboard at any time.
             </div>
 
-            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => setShowDisputeModal(false)}
-                className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-50 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => handleToggleDispute(selectedEarningForDispute, true, disputeReason)}
-                disabled={!disputeReason.trim()}
-                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-black cursor-pointer disabled:opacity-50"
-              >
-                Place on Hold
-              </button>
-            </div>
+            <form onSubmit={(e) => {
+              e.preventDefault();
+              if (disputeReason?.trim() && !savingDispute) {
+                handleToggleDispute(selectedEarningForDispute, true, disputeReason);
+              }
+            }} className="space-y-4">
+              <div>
+                <label className="block text-[11px] font-black uppercase tracking-wider text-slate-800 mb-1">
+                  Dispute / Investigation Reason <span className="text-rose-600">*</span>
+                </label>
+                <textarea
+                  rows={3}
+                  required
+                  autoFocus
+                  value={disputeReason}
+                  onChange={(e) => setDisputeReason(e.target.value)}
+                  placeholder="e.g. Guest reported unhygienic room condition under support ticket #12; pending inspection."
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-medium outline-none focus:border-red-600 focus:bg-white text-xs select-text"
+                ></textarea>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={savingDispute}
+                  onClick={() => setShowDisputeModal(false)}
+                  className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-50 cursor-pointer disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingDispute || !disputeReason?.trim()}
+                  className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-black cursor-pointer disabled:opacity-50 inline-flex items-center gap-2 shadow-md hover:scale-[1.02] active:scale-[0.98] transition-all"
+                >
+                  {savingDispute ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Placing Hold...
+                    </>
+                  ) : (
+                    'Place on Hold'
+                  )}
+                </button>
+              </div>
+            </form>
 
           </div>
         </div>
@@ -5808,8 +5964,8 @@ const AdminDashboard = () => {
             </div>
 
             {/* Bookings Table */}
-            <div className="flex-1 overflow-y-auto border border-slate-200 rounded-2xl min-h-[220px]">
-              <table className="w-full text-left text-xs">
+            <div className="flex-1 overflow-auto border border-slate-200 rounded-2xl min-h-[220px]">
+              <table className="w-full text-left text-xs whitespace-nowrap">
                 <thead className="bg-slate-50 text-slate-900 font-bold uppercase tracking-wider border-b border-slate-200 sticky top-0 z-10 shadow-2xs">
                   <tr>
                     <th className="p-3">Booking ID</th>

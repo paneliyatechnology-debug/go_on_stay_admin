@@ -36,10 +36,26 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// Interceptor to handle token refresh on 401
+// Interceptor to handle token refresh on 401 and Server Offline
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
+    // Detect if Backend Server is completely OFF / Unreachable (Network Error / Connection Refused)
+    const isNetworkError = !error.response && (error.code === 'ERR_NETWORK' || error.message?.includes('Network Error'));
+    if (isNetworkError) {
+      const hasStoredToken = localStorage.getItem('accessToken') || localStorage.getItem('user');
+      if (hasStoredToken) {
+        localStorage.removeItem('accessToken');
+        localStorage.removeItem('refreshToken');
+        localStorage.removeItem('user');
+        sessionStorage.clear();
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('auth:server-disconnected'));
+        }
+      }
+      return Promise.reject(error);
+    }
+
     const originalRequest = error.config;
     if (error.response?.status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
