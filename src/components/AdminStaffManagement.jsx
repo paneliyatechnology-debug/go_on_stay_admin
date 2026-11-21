@@ -8,16 +8,17 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { formatDisplayDate } from '../utils/dateUtils';
 import { parseApiError } from '../utils/errorHandler';
+import FieldError from './FieldError';
 import adminStaffService from '../services/adminStaffService';
 import staffOperationsService from '../services/staffOperationsService';
 import Pagination from './Pagination';
 
-// Department Definitions
+// Department Definitions (mapped to exact backend department codes)
 const DEPARTMENTS = [
   { id: 'RESERVATION', label: 'Reservation', badge: 'bg-blue-50 text-blue-700 border-blue-200', icon: Calendar, desc: 'Guest booking management and telephone calling coordination.' },
   { id: 'CUSTOMER_SUPPORT', label: 'Customer Support', badge: 'bg-purple-50 text-purple-700 border-purple-200', icon: MessageSquare, desc: 'Guest complaints resolution, ticket notes, and support messaging.' },
-  { id: 'REFUND', label: 'Refunds & Claims', badge: 'bg-rose-50 text-rose-700 border-rose-200', icon: RotateCcw, desc: 'Execution of Razorpay cancellation refunds for guests.' },
-  { id: 'PAYOUT', label: 'Payouts & Escrow', badge: 'bg-emerald-50 text-emerald-700 border-emerald-200', icon: Landmark, desc: 'Host settlement disbursements following 7-day holding periods.' },
+  { id: 'REFUNDS_AND_CLAIMS', label: 'Refunds & Claims', badge: 'bg-rose-50 text-rose-700 border-rose-200', icon: RotateCcw, desc: 'Execution of Razorpay cancellation refunds for guests.' },
+  { id: 'PAYOUT_AND_ESCROW', label: 'Payouts & Escrow', badge: 'bg-emerald-50 text-emerald-700 border-emerald-200', icon: Landmark, desc: 'Host settlement disbursements following 7-day holding periods.' },
   { id: 'HOTEL_VERIFICATION', label: 'Hotel Verification', badge: 'bg-amber-50 text-amber-700 border-amber-200', icon: Building2, desc: 'Compliance document audit, property approvals and rejections.' },
 ];
 
@@ -44,9 +45,17 @@ const DEFAULT_DEPT_PERMISSIONS = {
     can_view_bookings: true,
     can_manage_tickets: true,
   },
+  REFUNDS_AND_CLAIMS: {
+    can_view_bookings: true,
+    can_process_refunds: true,
+  },
   REFUND: {
     can_view_bookings: true,
     can_process_refunds: true,
+  },
+  PAYOUT_AND_ESCROW: {
+    can_view_settlements: true,
+    can_process_payouts: true,
   },
   PAYOUT: {
     can_view_settlements: true,
@@ -218,7 +227,7 @@ const AdminStaffManagement = () => {
               else if (code === 'MANAGE_TICKETS') permsObj.can_manage_tickets = true;
               else if (code === 'PROCESS_REFUNDS') permsObj.can_process_refunds = true;
               else if (code === 'PROCESS_PAYOUTS') permsObj.can_process_payouts = true;
-              else if (code === 'VERIFY_HOTELS') permsObj.can_verify_hotels = true;
+              else if (['VERIFY_HOTELS', 'VIEW_HOTELS', 'VERIFY_HOTEL', 'APPROVE_HOTEL'].includes(code)) permsObj.can_verify_hotels = true;
               else permsObj[code.toLowerCase()] = true;
             });
           } else if (typeof s.permissions === 'object' && s.permissions !== null) {
@@ -226,8 +235,10 @@ const AdminStaffManagement = () => {
           }
 
           let deptCode = s.department_code || s.department || 'RESERVATION';
-          if (deptCode === 'REFUNDS_AND_CLAIMS') deptCode = 'REFUND';
-          if (deptCode === 'PAYOUT_AND_ESCROW') deptCode = 'PAYOUT';
+          if (deptCode === 'REFUND' || deptCode === 'REFUNDS') deptCode = 'REFUNDS_AND_CLAIMS';
+          if (deptCode === 'PAYOUT' || deptCode === 'PAYOUTS') deptCode = 'PAYOUT_AND_ESCROW';
+          if (deptCode === 'SUPPORT') deptCode = 'CUSTOMER_SUPPORT';
+          if (deptCode === 'VERIFICATION') deptCode = 'HOTEL_VERIFICATION';
 
           return {
             id: s.id,
@@ -423,7 +434,7 @@ const AdminStaffManagement = () => {
     if (permissionsObj.can_manage_tickets) codes.push('MANAGE_TICKETS');
     if (permissionsObj.can_process_refunds) codes.push('PROCESS_REFUNDS');
     if (permissionsObj.can_process_payouts) codes.push('PROCESS_PAYOUTS');
-    if (permissionsObj.can_verify_hotels) codes.push('VERIFY_HOTELS');
+    if (permissionsObj.can_verify_hotels) codes.push('VIEW_HOTELS', 'VERIFY_HOTEL', 'APPROVE_HOTEL');
     if (permissionsObj.can_view_customer_contacts) codes.push('VIEW_CUSTOMER_CONTACTS');
     if (permissionsObj.can_view_hotel_contacts) codes.push('VIEW_HOTEL_CONTACTS');
     if (permissionsObj.can_view_settlements) codes.push('VIEW_SETTLEMENTS');
@@ -492,7 +503,7 @@ const AdminStaffManagement = () => {
     }
   };
 
-  // 2. Edit Staff Submit Handler (PATCH /api/staff/{id}/update/ & PUT /api/staff/{id}/permissions/update/)
+  // 2. Edit Staff Submit Handler (PATCH /api/staff/{id}/update/ & PUT /api/staff/{id}/permissions/update/ & PATCH /api/staff/{id}/status/)
   const handleUpdateStaff = async (e) => {
     e.preventDefault();
     if (!editForm) return;
@@ -501,13 +512,23 @@ const AdminStaffManagement = () => {
     try {
       // Step A: Update info
       await adminStaffService.updateStaff(editForm.id, {
+        department: editForm.department,
         designation: editForm.designation,
         phone_number: editForm.phone,
         first_name: editForm.first_name,
         last_name: editForm.last_name,
       });
 
-      // Step B: Update permissions
+      // Step B: Update account status (ACTIVE, INACTIVE, SUSPENDED)
+      if (editForm.status) {
+        const canonicalStatus = String(editForm.status).trim().toUpperCase();
+        await adminStaffService.updateStaffStatus(editForm.id, {
+          status: canonicalStatus,
+          reason: `Account status updated to ${canonicalStatus} by administrator in staff editor`,
+        });
+      }
+
+      // Step C: Update permissions
       const permsArray = mapUiPermissionsToBackendCodes(editForm.permissions);
       try {
         await adminStaffService.updateStaffPermissions(editForm.id, permsArray);
@@ -515,9 +536,9 @@ const AdminStaffManagement = () => {
         console.warn('Permissions update notice:', pe);
       }
 
-      showToast?.('Staff details updated successfully in database!', 'success');
+      showToast?.('Staff details and account status updated successfully in database!', 'success');
       setShowEditModal(false);
-      loadStaff();
+      await loadStaff();
     } catch (err) {
       console.error('Update staff error:', err);
       const parsed = parseApiError(err, 'Failed to update staff details on backend.');
@@ -529,13 +550,14 @@ const AdminStaffManagement = () => {
 
   // 3. Status Toggle Handler (PATCH /api/staff/{id}/status/)
   const handleToggleStatus = async (staffId, nextStatus) => {
+    const canonical = String(nextStatus || 'ACTIVE').trim().toUpperCase();
     try {
       await adminStaffService.updateStaffStatus(staffId, {
-        status: nextStatus,
-        reason: `Status updated to ${nextStatus} by administrator`,
+        status: canonical,
+        reason: `Status updated to ${canonical} by administrator`,
       });
-      showToast?.(`Account status changed to ${nextStatus} in database.`, 'success');
-      loadStaff();
+      showToast?.(`Account status changed to ${canonical} in database.`, 'success');
+      await loadStaff();
     } catch (err) {
       console.error('Status toggle API error:', err);
       const parsed = parseApiError(err, 'Failed to update account status on backend.');
@@ -625,25 +647,15 @@ const AdminStaffManagement = () => {
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
 
-      {/* PHASE 1 ARCHITECTURAL BANNER */}
-      <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 border border-indigo-900/60 rounded-2xl p-4 sm:p-5 text-white shadow-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-        <div className="flex items-start gap-3.5">
-          <div className="w-10 h-10 rounded-xl bg-amber-400/20 text-amber-400 border border-amber-400/30 flex items-center justify-center shrink-0 mt-0.5">
+      {/* ADMIN STAFF MANAGEMENT HEADER BANNER */}
+      <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 border border-indigo-900/60 rounded-2xl p-4 sm:p-5 text-white shadow-xl flex flex-col md:flex-row items-center justify-between gap-4">
+        <div className="flex items-center gap-3.5">
+          <div className="w-10 h-10 rounded-xl bg-amber-400/20 text-amber-400 border border-amber-400/30 flex items-center justify-center shrink-0">
             <ShieldCheck className="w-6 h-6 text-amber-400" />
           </div>
-          <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-sm font-black text-white tracking-wide">Admin Staff Management Console</span>
-              <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider shadow-xs ${
-                backendConnected ? 'bg-emerald-500 text-slate-950 font-extrabold' : 'bg-amber-400 text-slate-950'
-              }`}>
-                {backendConnected ? '● Live Database Connected' : 'Phase 2 Live API Connected'}
-              </span>
-            </div>
-            <p className="text-xs text-slate-300 mt-1 max-w-2xl leading-relaxed">
-              Connected directly to Central GoOnStay Backend APIs: automated Employee ID & Login ID generation, database staff roster, live status controls, and granular permissions.
-            </p>
-          </div>
+          <h2 className="text-base sm:text-lg font-black text-white tracking-wide">
+            Admin Staff Management
+          </h2>
         </div>
 
         <div className="flex items-center gap-2 self-stretch md:self-auto justify-end">
@@ -834,10 +846,6 @@ const AdminStaffManagement = () => {
               <option value="SUSPENDED">Suspended Only</option>
             </select>
           </div>
-
-          <div className="text-xs font-bold text-slate-500 pl-2">
-            Showing <strong className="text-slate-900">{filteredStaff.length}</strong> of {totalStaff}
-          </div>
         </div>
       </div>
 
@@ -976,26 +984,23 @@ const AdminStaffManagement = () => {
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
 
-                          {/* Status Switcher Quick Menu */}
-                          {staff.status !== 'ACTIVE' ? (
-                            <button
-                              type="button"
-                              onClick={() => handleToggleStatus(staff.id, 'ACTIVE')}
-                              className="px-2 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-[10px] font-bold transition-all cursor-pointer inline-flex items-center gap-1"
-                              title="Activate Staff Account"
-                            >
-                              <UserCheck className="w-3 h-3 text-emerald-600" /> Activate
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => handleToggleStatus(staff.id, 'INACTIVE')}
-                              className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-[10px] font-bold transition-all cursor-pointer inline-flex items-center gap-1"
-                              title="Deactivate Staff Account"
-                            >
-                              <UserX className="w-3 h-3 text-slate-500" /> Deactivate
-                            </button>
-                          )}
+                          {/* Quick Status Dropdown */}
+                          <select
+                            value={staff.status}
+                            onChange={(e) => handleToggleStatus(staff.id, e.target.value)}
+                            className={`px-2 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider border outline-none cursor-pointer transition-all ${
+                              staff.status === 'ACTIVE'
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-300 hover:bg-emerald-100'
+                                : staff.status === 'SUSPENDED'
+                                ? 'bg-rose-50 text-rose-700 border-rose-300 hover:bg-rose-100'
+                                : 'bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200'
+                            }`}
+                            title="Update Account Status"
+                          >
+                            <option value="ACTIVE">Active</option>
+                            <option value="INACTIVE">Inactive</option>
+                            <option value="SUSPENDED">Suspended</option>
+                          </select>
                         </div>
                       </td>
                     </tr>

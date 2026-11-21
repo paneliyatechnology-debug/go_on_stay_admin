@@ -2,6 +2,15 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import api from '../services/api';
 import staffAuthService from '../services/staffAuthService';
 import { parseApiError } from '../utils/errorHandler';
+import {
+  isAdminUser,
+  isStaffUser,
+  getUserPermissions,
+  hasPermission,
+  getAllowedTabs,
+  isTabAllowed,
+  getDefaultTabForUser,
+} from '../utils/permissionUtils';
 
 const AuthContext = createContext(null);
 
@@ -242,8 +251,13 @@ export const AuthProvider = ({ children }) => {
         login,
         logout,
         isAuthenticated: !!user,
-        isAdmin: user?.role === 'ADMIN' || user?.role === 'SUPER_ADMIN' || user?.is_superuser,
-        isStaff: !!user?.isStaff || user?.role === 'STAFF',
+        isAdmin: isAdminUser(user),
+        isStaff: isStaffUser(user),
+        hasPermission: (permKey) => hasPermission(user, permKey),
+        allowedTabs: getAllowedTabs(user),
+        isTabAllowed: (tabId) => isTabAllowed(user, tabId),
+        defaultTab: getDefaultTabForUser(user),
+        userPermissions: getUserPermissions(user),
         staffAuthService,
         changeStaffPassword: staffAuthService.changePassword,
         forgotStaffPassword: staffAuthService.forgotPassword,

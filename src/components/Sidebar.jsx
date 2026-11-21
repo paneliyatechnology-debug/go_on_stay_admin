@@ -260,10 +260,12 @@ const Sidebar = ({
             </div>
             <div className="min-w-0">
               <div className={`text-xs font-bold truncate ${isLuxury ? 'text-white' : 'text-slate-900'}`}>
-                @{user?.username || 'admin'}
+                @{user?.login_id || user?.username || 'admin'}
               </div>
               <div className={`text-[10px] font-medium uppercase truncate ${isLuxury ? 'text-[#D4AF37]' : 'text-slate-500'}`}>
-                {user?.role || 'SUPER_ADMIN'}
+                {user?.isStaff
+                  ? `${user?.department_name || user?.department_code || 'STAFF'} (${user?.employee_id || 'STAFF'})`
+                  : (user?.role || 'SUPER_ADMIN')}
               </div>
             </div>
           </div>

@@ -38,14 +38,29 @@ export const adminStaffService = {
    * @param {Object} staffData - { first_name, last_name, email, phone_number, department, designation, permissions }
    */
   createStaff: async (staffData) => {
+    let rawDept = staffData.department || (staffData.departments && staffData.departments[0]) || 'RESERVATION';
+    if (typeof rawDept === 'object' && rawDept !== null) {
+      rawDept = rawDept.code || rawDept.id || 'RESERVATION';
+    }
+
+    let dept = rawDept;
+    if (typeof dept === 'string') {
+      const upper = dept.trim().toUpperCase();
+      if (upper === 'REFUND' || upper === 'REFUNDS') dept = 'REFUNDS_AND_CLAIMS';
+      else if (upper === 'PAYOUT' || upper === 'PAYOUTS') dept = 'PAYOUT_AND_ESCROW';
+      else if (upper === 'SUPPORT') dept = 'CUSTOMER_SUPPORT';
+      else if (upper === 'VERIFICATION') dept = 'HOTEL_VERIFICATION';
+      else dept = upper;
+    }
+
     const payload = {
-      first_name: staffData.first_name,
-      last_name: staffData.last_name,
-      email: staffData.email,
-      phone_number: staffData.phone_number || staffData.phone,
-      department: staffData.department || (staffData.departments && staffData.departments[0]) || 'RESERVATION',
-      designation: staffData.designation || 'Staff Officer',
-      permissions: staffData.permissions || ['VIEW_BOOKINGS'],
+      first_name: (staffData.first_name || '').trim(),
+      last_name: (staffData.last_name || '').trim(),
+      email: (staffData.email || '').trim(),
+      phone_number: (staffData.phone_number || staffData.phone || '').trim(),
+      department: dept,
+      designation: (staffData.designation || 'Staff Officer').trim(),
+      permissions: Array.isArray(staffData.permissions) ? staffData.permissions : ['VIEW_BOOKINGS'],
     };
     const response = await api.post('/staff/create/', payload);
     return response.data;
@@ -96,7 +111,20 @@ export const adminStaffService = {
    * @param {Object} updateData - { designation, phone_number, first_name, last_name, email, etc. }
    */
   updateStaff: async (staffId, updateData) => {
-    const response = await api.patch(`/staff/${staffId}/update/`, updateData);
+    const payload = { ...updateData };
+    if (payload.department) {
+      let dept = payload.department;
+      if (typeof dept === 'string') {
+        const upper = dept.trim().toUpperCase();
+        if (upper === 'REFUND' || upper === 'REFUNDS') dept = 'REFUNDS_AND_CLAIMS';
+        else if (upper === 'PAYOUT' || upper === 'PAYOUTS') dept = 'PAYOUT_AND_ESCROW';
+        else if (upper === 'SUPPORT') dept = 'CUSTOMER_SUPPORT';
+        else if (upper === 'VERIFICATION') dept = 'HOTEL_VERIFICATION';
+        else dept = upper;
+      }
+      payload.department = dept;
+    }
+    const response = await api.patch(`/staff/${staffId}/update/`, payload);
     return response.data;
   },
 
@@ -107,9 +135,10 @@ export const adminStaffService = {
    * @param {Object} statusData - { status: 'ACTIVE'|'INACTIVE'|'SUSPENDED', reason: string }
    */
   updateStaffStatus: async (staffId, { status, reason = '' }) => {
+    const canonicalStatus = String(status || 'ACTIVE').trim().toUpperCase();
     const response = await api.patch(`/staff/${staffId}/status/`, {
-      status,
-      reason: reason || `Status updated to ${status} by admin`,
+      status: canonicalStatus,
+      reason: reason || `Status updated to ${canonicalStatus} by admin`,
     });
     return response.data;
   },

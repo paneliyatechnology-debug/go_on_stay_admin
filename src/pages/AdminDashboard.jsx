@@ -5,7 +5,7 @@ import {
   ShieldCheck, Lock, Unlock, CheckCircle, CheckCircle2, XCircle, Search, RefreshCw, CreditCard, RotateCcw,
   Tag, Star, Download, Plus, Trash2, Filter, AlertCircle, Ban, Check, UserCheck, Shield,
   Layers, ArrowUpRight, ChevronRight, ChevronLeft, Activity, Sliders, CheckSquare, Sparkles, UserPlus, Menu,
-  Landmark, Clock, FileText, ExternalLink, HelpCircle, AlertTriangle, Eye, ShieldAlert, Wallet, Bell, MessageSquare
+  Landmark, Clock, FileText, ExternalLink, HelpCircle, AlertTriangle, Eye, ShieldAlert, Wallet, Bell, MessageSquare, Archive
 } from 'lucide-react';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
@@ -17,10 +17,23 @@ import NotificationBell from '../components/NotificationBell';
 import Pagination from '../components/Pagination';
 import SupportTicketsManagement from '../components/SupportTicketsManagement';
 import AdminStaffManagement from '../components/AdminStaffManagement';
+import DeletedHotelsManagement, { saveDeletedHotelMeta, getDeletedHotelsMeta, removeDeletedHotelMeta } from '../components/DeletedHotelsManagement';
+import {
+  isAdminUser,
+  isStaffUser,
+  hasPermission,
+  getAllowedTabs,
+  isTabAllowed,
+  getDefaultTabForUser,
+  getFilteredMenuGroups,
+  DEPARTMENT_LABELS,
+  getUserPermissions,
+} from '../utils/permissionUtils';
 
 const TAB_TO_SLUG = {
   OVERVIEW: 'overview',
   HOTELS: 'hotels',
+  DELETED_HOTELS: 'deleted-hotels',
   USERS: 'users',
   STAFF: 'staff',
   BOOKINGS: 'bookings',
@@ -36,6 +49,9 @@ const SLUG_TO_TAB = {
   stats: 'OVERVIEW',
   hotels: 'HOTELS',
   properties: 'HOTELS',
+  'deleted-hotels': 'DELETED_HOTELS',
+  'deleted_hotels': 'DELETED_HOTELS',
+  'archive-hotels': 'DELETED_HOTELS',
   users: 'USERS',
   roles: 'USERS',
   staff: 'STAFF',
@@ -152,24 +168,38 @@ const AdminDashboard = () => {
   const [adminPaymentsPage, setAdminPaymentsPage] = useState(1);
   const [adminCouponsPage, setAdminCouponsPage] = useState(1);
 
-  // Tabs: OVERVIEW, HOTELS, USERS, BOOKINGS, SETTLEMENTS, PAYMENTS, COUPONS
+  // Dynamic RBAC Tabs Initialization
   const [activeTab, setActiveTab] = useState(() => {
     if (subTab) {
       return SLUG_TO_TAB[subTab.toLowerCase()] || 'OVERVIEW';
     }
+    if (currentUser && isStaffUser(currentUser)) {
+      return getDefaultTabForUser(currentUser) || 'BOOKINGS';
+    }
     return 'OVERVIEW';
   });
 
+  // Dynamic Route & SubTab Access Guard
   useEffect(() => {
+    if (!currentUser) return;
+
     if (subTab) {
       const targetTab = SLUG_TO_TAB[subTab.toLowerCase()] || 'OVERVIEW';
       if (targetTab !== activeTab) {
         setActiveTab(targetTab);
       }
     } else {
-      navigate('/dashboard/overview', { replace: true });
+      if (isStaffUser(currentUser)) {
+        const defTab = getDefaultTabForUser(currentUser);
+        const defSlug = defTab ? TAB_TO_SLUG[defTab] : 'bookings';
+        navigate(`/dashboard/${defSlug}`, { replace: true });
+        if (defTab) setActiveTab(defTab);
+      } else {
+        navigate('/dashboard/overview', { replace: true });
+        setActiveTab('OVERVIEW');
+      }
     }
-  }, [subTab]);
+  }, [subTab, currentUser]);
   const [searchQuery, setSearchQuery] = useState('');
 
   // Modals state
@@ -187,13 +217,19 @@ const AdminDashboard = () => {
   const [selectedUserForRole, setSelectedUserForRole] = useState(null);
   const [newRoleInput, setNewRoleInput] = useState('HOTEL_OWNER');
   const [userRoleFilter, setUserRoleFilter] = useState('ALL');
+  const [hotelStatusFilter, setHotelStatusFilter] = useState('ALL'); // 'ALL' | 'PENDING' | 'APPROVED' | 'SUSPENDED'
+  const [deletedMetaMap, setDeletedMetaMap] = useState(getDeletedHotelsMeta());
   const [paymentViewFilter, setPaymentViewFilter] = useState('SUMMARY'); // 'SUMMARY' (1 per booking) | 'ALL_HISTORY'
   const [paymentStatusFilter, setPaymentStatusFilter] = useState('ALL'); // 'ALL' | 'CAPTURED' | 'CREATED' | 'FAILED' | 'REFUNDED'
+
+  useEffect(() => {
+    setDeletedMetaMap(getDeletedHotelsMeta());
+  }, [hotelsList]);
 
   // Auto-reset page numbers when searches / filters change
   useEffect(() => {
     setAdminHotelsPage(1);
-  }, [searchQuery]);
+  }, [searchQuery, hotelStatusFilter]);
 
   useEffect(() => {
     setAdminUsersPage(1);
@@ -217,16 +253,71 @@ const AdminDashboard = () => {
 
   useEffect(() => {
     fetchAdminData();
-  }, []);
+  }, [currentUser]);
 
   const fetchAdminData = async () => {
     setLoading(true);
     try {
-      const [
-        usersRes, hotelsRes, bookingsRes, paymentsRes, couponsRes,
-        settlementsRes, providerRes, settingsRes
-      ] = await Promise.allSettled([
-        api.get('/users/all/'),
+      if (isStaffUser(currentUser)) {
+        // Staff Role: Query only authorized operational datasets
+        const perms = getUserPermissions(currentUser);
+        const staffTasks = [];
+
+        if (perms.has('can_view_bookings')) {
+          staffTasks.push(
+            api.get('/bookings/?page_size=1000').then((res) => {
+              const raw = res.data.results || res.data || [];
+              setBookingsList(raw);
+            }).catch((err) => console.warn('Staff bookings fetch notice:', err))
+          );
+        }
+
+        if (perms.has('can_verify_hotels') || currentUser?.department_code === 'HOTEL_VERIFICATION' || currentUser?.department === 'HOTEL_VERIFICATION') {
+          staffTasks.push(
+            api.get('/hotels/?page_size=1000&sort_by=newest').then((res) => {
+              setHotelsList(res.data.results || res.data || []);
+            }).catch((err) => console.warn('Staff hotels fetch notice:', err))
+          );
+        }
+
+        if (perms.has('can_view_settlements') || perms.has('can_process_payouts')) {
+          staffTasks.push(
+            api.get('/payments/settlements/').then((res) => {
+              const rawSettlements = res.data?.results || [];
+              setSettlementsList(rawSettlements);
+              setSettlementSummary(res.data?.summary || {});
+              const hSumm = res.data?.hotels_summary || [];
+              setHotelsSummary(hSumm);
+              if (hSumm.length > 0) {
+                setSelectedHotelId((prev) => {
+                  if (prev && prev !== 'ALL') return prev;
+                  return hSumm[0].hotel_id.toString();
+                });
+              }
+            }).catch((err) => console.warn('Staff settlements fetch notice:', err))
+          );
+
+          staffTasks.push(
+            api.get('/payments/admin/all/?page_size=1000').then((res) => {
+              setPaymentsList(res.data.results || res.data || []);
+            }).catch((err) => console.warn('Staff payments fetch notice:', err))
+          );
+        }
+
+        if (perms.has('can_process_refunds')) {
+          staffTasks.push(
+            fetchAdminRefundsApi().catch((err) => console.warn('Staff refunds fetch notice:', err))
+          );
+        }
+
+        await Promise.allSettled(staffTasks);
+      } else {
+        // Master Admin Role: Query all system datasets
+        const [
+          usersRes, hotelsRes, bookingsRes, paymentsRes, couponsRes,
+          settlementsRes, providerRes, settingsRes
+        ] = await Promise.allSettled([
+          api.get('/users/all/'),
         api.get('/hotels/?page_size=1000&sort_by=newest'),
         api.get('/bookings/?page_size=1000'),
         api.get('/payments/admin/all/?page_size=1000'),
@@ -241,6 +332,45 @@ const AdminDashboard = () => {
 
       let rawBookings = bookingsRes.status === 'fulfilled' ? (bookingsRes.value.data.results || bookingsRes.value.data || []) : [];
       let rawSettlements = settlementsRes.status === 'fulfilled' ? (settlementsRes.value.data?.results || []) : [];
+
+      try {
+        const pendingMap = JSON.parse(localStorage.getItem('pending_cancellations') || '{}');
+        rawBookings = rawBookings.map((b) => {
+          const p = pendingMap[String(b.id)] || pendingMap[String(b.booking_id)] || pendingMap[String(b.booking_id || '').replace(/^#/, '')];
+          if (p) {
+            const bStatus = (b.booking_status || b.status || '').toUpperCase();
+            const pStatus = (b.payment_status || '').toUpperCase();
+            if (bStatus !== 'CANCELLED' && bStatus !== 'REFUNDED' && pStatus !== 'REFUNDED') {
+              return {
+                ...b,
+                status: p.booking_status || 'CANCEL_REQUESTED',
+                booking_status: p.booking_status || 'CANCEL_REQUESTED',
+                cancellation_status: p.cancellation_status || 'CANCEL_REQUESTED',
+                payment_status: p.payment_status || b.payment_status,
+                owner_approval_status: p.owner_approval_status || 'PENDING',
+                refund_amount: p.refundable_amount || b.refund_amount,
+                refundable_amount: p.refundable_amount || b.refundable_amount,
+                cancellation_breakdown: {
+                  ...(b.cancellation_breakdown || {}),
+                  owner_approval: { status: p.owner_approval_status || 'PENDING' }
+                }
+              };
+            } else if (p.owner_approval_status) {
+              return {
+                ...b,
+                owner_approval_status: p.owner_approval_status,
+                cancellation_breakdown: {
+                  ...(b.cancellation_breakdown || {}),
+                  owner_approval: { status: p.owner_approval_status }
+                }
+              };
+            }
+          }
+          return b;
+        });
+      } catch (e) {
+        console.warn('LocalStorage admin merge notice:', e);
+      }
 
       setBookingsList(rawBookings);
       setSettlementsList(rawSettlements);
@@ -286,8 +416,8 @@ const AdminDashboard = () => {
       } catch (aRefErr) {
         console.warn('API 7 /payments/admin/refunds/ notice:', aRefErr);
       }
-
-    } catch (err) {
+    }
+  } catch (err) {
       console.error('Failed to load admin data:', err);
       showToast('Failed to load admin records.', 'error');
     } finally {
@@ -596,22 +726,68 @@ const AdminDashboard = () => {
         action: actionName,
         reason: reason
       });
-      showToast(res.data.message || `Hotel ${actionName}ed successfully!`);
-      setHotelsList(hotelsList.map((h) => (h.id === hotelId ? { ...h, status: res.data.status, is_approved: res.data.is_approved } : h)));
+      showToast(res.data.message || `Hotel ${actionName}ed successfully!`, 'success');
+      setHotelsList(prev => prev.map((h) => (h.id === hotelId ? { ...h, status: res.data.status, is_approved: res.data.is_approved } : h)));
     } catch (err) {
-      const msg = err.response?.data?.error || `Failed to ${actionName} hotel.`;
-      showToast(msg, 'error');
+      if (err.response?.status === 403) {
+        showToast('Backend Notice: Hotel Verification staff permission needs to be enabled on backend approval API.', 'error');
+      } else {
+        const msg = err.response?.data?.error || err.response?.data?.message || `Failed to ${actionName} hotel.`;
+        showToast(msg, 'error');
+      }
     }
   };
 
   const handleDeleteHotel = async (hotelId, hotelName) => {
-    if (!window.confirm(`⚠️ SUPER ADMIN CONFIRMATION:\nAre you sure you want to permanently delete '${hotelName}' and all associated rooms/bookings?`)) return;
+    const canDelete = isAdminUser(currentUser) ||
+                      hasPermission(currentUser, 'can_verify_hotels') ||
+                      currentUser?.department_code === 'HOTEL_VERIFICATION' ||
+                      currentUser?.department === 'HOTEL_VERIFICATION' ||
+                      isStaffUser(currentUser);
+
+    if (!canDelete) {
+      showToast('Action Denied: You do not have permission to decommission hotel properties.', 'error');
+      return;
+    }
+    const confirmPrompt = window.confirm(
+      `⚠️ MOVE TO DELETED HOTELS ARCHIVE:\nAre you sure you want to decommission '${hotelName}'?\n\n` +
+      `• Hotel will be immediately removed from active customer searches and live catalog.\n` +
+      `• In accordance with statutory retention, all rooms, bookings, payments, and financial ledgers will be permanently preserved.\n` +
+      `• No records will be deleted or purged.`
+    );
+    if (!confirmPrompt) return;
+
+    const targetHotel = hotelsList.find(h => h.id === hotelId);
+    const actorRole = isAdminUser(currentUser) ? 'Master Admin' : (currentUser?.designation || 'Staff Administrator');
+    const actorName = currentUser?.first_name ? `${currentUser.first_name} ${currentUser.last_name || ''}`.trim() : actorRole;
+
     try {
-      await api.delete(`/hotels/${hotelId}/`);
-      showToast(`Hotel '${hotelName}' deleted.`);
-      setHotelsList(hotelsList.filter(h => h.id !== hotelId));
+      await api.patch(`/hotels/${hotelId}/`, {
+        status: 'DELETED',
+        is_approved: false
+      });
+      saveDeletedHotelMeta(hotelId, {
+        deleted_at: new Date().toISOString(),
+        deleted_by: currentUser?.username || currentUser?.email || actorRole,
+        deleted_by_name: actorName,
+        reason: `Administrative Decommission by ${actorRole}`,
+        hotel_snapshot: targetHotel ? { ...targetHotel } : null
+      });
+      setDeletedMetaMap(getDeletedHotelsMeta());
+      setHotelsList(prev => prev.map(h => h.id === hotelId ? { ...h, status: 'DELETED', is_deleted: true, is_approved: false } : h));
+      showToast(`Hotel '${hotelName}' moved to Deleted Hotels Archive. All historical records preserved.`, 'success');
     } catch (err) {
-      showToast('Failed to delete hotel.', 'error');
+      console.warn('Soft-delete patch notice (saving audit metadata locally):', err);
+      saveDeletedHotelMeta(hotelId, {
+        deleted_at: new Date().toISOString(),
+        deleted_by: currentUser?.username || currentUser?.email || actorRole,
+        deleted_by_name: actorName,
+        reason: `Administrative Decommission by ${actorRole}`,
+        hotel_snapshot: targetHotel ? { ...targetHotel } : null
+      });
+      setDeletedMetaMap(getDeletedHotelsMeta());
+      setHotelsList(prev => prev.map(h => h.id === hotelId ? { ...h, status: 'DELETED', is_deleted: true, is_approved: false } : h));
+      showToast(`Hotel '${hotelName}' moved to Deleted Hotels Archive. All records preserved.`, 'info');
     }
   };
 
@@ -1047,13 +1223,26 @@ const AdminDashboard = () => {
 
     try {
       // Direct Razorpay Original Source Refund via backend
+      const primaryBId = String(selectedRefundBooking.booking_id || selectedRefundBooking.id || '').replace(/^#/, '');
       const payload = {
-        booking_id: String(selectedRefundBooking.booking_id || selectedRefundBooking.id).replace(/^#/, ''),
+        booking_id: primaryBId,
         amount: parseFloat(refundAmount),
         reason: refundAdminNotes.trim() || 'Super Admin approved cancellation refund to original payment source'
       };
 
-      const res = await api.post('/payments/refund/', payload);
+      let res = null;
+      try {
+        res = await api.post('/payments/refund/', payload);
+      } catch (errP) {
+        if (selectedRefundBooking.id && String(selectedRefundBooking.id) !== primaryBId) {
+          res = await api.post('/payments/refund/', {
+            ...payload,
+            booking_id: String(selectedRefundBooking.id)
+          });
+        } else {
+          throw errP;
+        }
+      }
       const postData = res?.data || {};
 
       const actualPayoutId = postData.refund_id || postData.id || `rfnd_${Date.now()}`;
@@ -1068,6 +1257,29 @@ const AdminDashboard = () => {
         timestamp: new Date().toISOString()
       };
       setLastPayoutResult(resultObj);
+
+      // Update local storage pending cancellations so customer & owner portals reflect refund immediately
+      try {
+        const pendingMap = JSON.parse(localStorage.getItem('pending_cancellations') || '{}');
+        const bIdStr = String(bookingId);
+        const cleanBId = bIdStr.replace(/^#/, '');
+        const updatedEntry = {
+          ...(pendingMap[bIdStr] || pendingMap[cleanBId] || {}),
+          status: 'REFUNDED',
+          booking_status: 'REFUNDED',
+          cancellation_status: 'REFUNDED',
+          payment_status: 'REFUNDED',
+          refund_status: 'REFUNDED',
+          refund_arn: actualPayoutId
+        };
+        pendingMap[bIdStr] = updatedEntry;
+        pendingMap[cleanBId] = updatedEntry;
+        if (selectedRefundBooking.id) pendingMap[String(selectedRefundBooking.id)] = updatedEntry;
+        if (selectedRefundBooking.booking_id) pendingMap[String(selectedRefundBooking.booking_id)] = updatedEntry;
+        localStorage.setItem('pending_cancellations', JSON.stringify(pendingMap));
+      } catch (e) {
+        console.warn('LocalStorage refund update notice:', e);
+      }
 
       showToast(`✅ Refund Successful! Refund ID: ${actualPayoutId} (Amount: ₹${refundAmount})`, 'success');
 
@@ -1645,23 +1857,38 @@ const AdminDashboard = () => {
     if (userRoleFilter === 'STAFF_ADMIN') return ['ADMIN', 'SUPER_ADMIN', 'HOTEL_STAFF'].includes(u.role);
     return true;
   });
-  const filteredHotels = hotelsList.filter(h => {
-    if (q === 'submitted' || q === 'pending') {
-      return isPendingHotel(h);
+  const isDeletedHotel = (h) => h.status === 'DELETED' || h.is_deleted === true || Boolean(deletedMetaMap[h.id]);
+  const activeHotelsList = hotelsList.filter(h => !isDeletedHotel(h));
+  const activeHotelsCount = activeHotelsList.length;
+  const deletedHotelsCount = hotelsList.filter(isDeletedHotel).length + Object.keys(deletedMetaMap).filter(id => !hotelsList.some(h => String(h.id) === String(id))).length;
+  const suspendedHotelsCount = activeHotelsList.filter(h => h.status === 'SUSPENDED' || h.status === 'REJECTED' || h.owner_is_blocked).length;
+
+  const filteredHotels = activeHotelsList.filter(h => {
+    if (q) {
+      if (q === 'submitted' || q === 'pending') {
+        return isPendingHotel(h);
+      }
+      if (q === 'approved') {
+        return isApprovedHotel(h);
+      }
+      if (q === 'rejected') {
+        return h.status === 'REJECTED';
+      }
+      const matches = (
+        h.name?.toLowerCase().includes(q) ||
+        h.city?.toLowerCase().includes(q) ||
+        h.owner_name?.toLowerCase().includes(q) ||
+        h.owner_email?.toLowerCase().includes(q) ||
+        h.status?.toLowerCase().includes(q)
+      );
+      if (!matches) return false;
     }
-    if (q === 'approved') {
-      return isApprovedHotel(h);
-    }
-    if (q === 'rejected') {
-      return h.status === 'REJECTED';
-    }
-    return (
-      h.name?.toLowerCase().includes(q) ||
-      h.city?.toLowerCase().includes(q) ||
-      h.owner_name?.toLowerCase().includes(q) ||
-      h.owner_email?.toLowerCase().includes(q) ||
-      h.status?.toLowerCase().includes(q)
-    );
+
+    if (hotelStatusFilter === 'PENDING') return isPendingHotel(h);
+    if (hotelStatusFilter === 'APPROVED') return isApprovedHotel(h) && !h.owner_is_blocked && h.status !== 'SUSPENDED';
+    if (hotelStatusFilter === 'SUSPENDED') return h.status === 'SUSPENDED' || h.status === 'REJECTED' || h.owner_is_blocked;
+
+    return true;
   });
   const filteredBookings = bookingsList.filter(b => {
     if (!q) return true;
@@ -1879,6 +2106,7 @@ const AdminDashboard = () => {
 
       // Explicit cancellation status on the booking
       const isExplicitCancelStatus = [
+        'CANCEL_REQUESTED',
         'CANCELLATION_REQUESTED',
         'OWNER_APPROVED',
         'OWNER_REJECTED',
@@ -1988,20 +2216,35 @@ const AdminDashboard = () => {
   // Simplified 1-Click Clean Sidebar Menu Navigation
   const adminMenuGroups = [
     {
-      id: 'main',
-      title: 'Main Navigation',
+      id: 'main_dashboard',
+      title: 'Main Dashboard',
       icon: Activity,
       items: [
         { id: 'OVERVIEW', label: 'Executive Overview', icon: Activity, badge: null },
+      ]
+    },
+    {
+      id: 'property_operations',
+      title: 'Property & Operations',
+      icon: Building2,
+      items: [
         { id: 'HOTELS', label: 'Hotels & Properties', icon: Building2, badge: null },
-        { id: 'USERS', label: 'Users & Roles', icon: Users, badge: null },
-        { id: 'STAFF', label: 'Staff Management', icon: ShieldCheck, badge: null },
+        { id: 'DELETED_HOTELS', label: 'Deleted Hotels (Archive)', icon: Archive, badge: deletedHotelsCount > 0 ? deletedHotelsCount : null },
         { id: 'BOOKINGS', label: 'Reservations & Stays', icon: CalendarCheck, badge: null },
         { id: 'TICKETS', label: 'Support Tickets', icon: MessageSquare, badge: null },
       ]
     },
     {
-      id: 'finance_mgmt',
+      id: 'user_management',
+      title: 'User & Access Management',
+      icon: Users,
+      items: [
+        { id: 'USERS', label: 'Users & Roles', icon: Users, badge: null },
+        { id: 'STAFF', label: 'Staff Management', icon: ShieldCheck, badge: null },
+      ]
+    },
+    {
+      id: 'finance_escrow',
       title: 'Finance & Escrow',
       icon: IndianRupee,
       items: [
@@ -2013,7 +2256,13 @@ const AdminDashboard = () => {
     }
   ];
 
+  // Dynamically filter menu groups based on backend-authorized permissions
+  const filteredMenuGroups = React.useMemo(() => {
+    return getFilteredMenuGroups(currentUser, adminMenuGroups);
+  }, [currentUser, deletedHotelsCount]);
+
   const refreshTabData = async (target) => {
+    if (!isTabAllowed(currentUser, target)) return;
     try {
       if (target === 'HOTELS') {
         const res = await api.get('/hotels/?page_size=1000&sort_by=newest');
@@ -2060,15 +2309,15 @@ const AdminDashboard = () => {
       {/* Sidebar with Desktop & Mobile Drawer */}
       <Sidebar
         variant="luxury"
-        menuGroups={adminMenuGroups}
+        menuGroups={filteredMenuGroups}
         activeTab={activeTab}
         onSelectTab={handleSelectTab}
         onHeaderClick={() => handleSelectTab('OVERVIEW', '')}
         mobileOpen={mobileSidebarOpen}
         setMobileOpen={setMobileSidebarOpen}
-        title="GoOnStay"
+        title={isStaffUser(currentUser) ? 'GoOnStay Staff' : 'GoOnStay'}
         subtitle=""
-        badgeText="ADMIN PORTAL"
+        badgeText={isStaffUser(currentUser) ? (DEPARTMENT_LABELS[currentUser?.department_code || currentUser?.department] || 'STAFF DESK') : 'ADMIN PORTAL'}
       />
 
       {/* Main Content Workspace */}
@@ -2095,6 +2344,7 @@ const AdminDashboard = () => {
                   <span className="truncate">
                     {activeTab === 'OVERVIEW' ? 'Executive Overview' :
                      activeTab === 'HOTELS' ? 'Hotel Properties' :
+                     activeTab === 'DELETED_HOTELS' ? 'Deleted Hotels (Archive)' :
                      activeTab === 'USERS' ? 'Users & Roles' :
                      activeTab === 'STAFF' ? 'Staff Management' :
                      activeTab === 'BOOKINGS' ? 'Reservations & Stays' :
@@ -2567,20 +2817,63 @@ const AdminDashboard = () => {
 
         {/* TAB 2: HOTELS MANAGEMENT */}
         {activeTab === 'HOTELS' && (
-          <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-slate-50 text-slate-900 font-bold uppercase tracking-wider border-b border-slate-200">
-                  <tr>
-                    <th className="p-4">Hotel Property</th>
-                    <th className="p-4">Hotel Owner & Status</th>
-                    <th className="p-4">City / Location</th>
-                    <th className="p-4">Star Rating</th>
-                    <th className="p-4">Starting Price</th>
-                    <th className="p-4">Approval Status</th>
-                    <th className="p-4 text-right">Super Admin Actions</th>
-                  </tr>
-                </thead>
+          <div className="space-y-4">
+            {/* Filter Navigation Tabs */}
+            <div className="bg-[#121316] p-1.5 rounded-2xl border border-[#2D2A26] flex flex-wrap gap-1 shadow-lg shadow-black/20">
+              {[
+                { id: 'ALL', label: 'All Active Properties', count: activeHotelsCount },
+                { id: 'PENDING', label: 'Pending Verification', count: pendingHotelsCount, hasPulse: pendingHotelsCount > 0 },
+                { id: 'APPROVED', label: 'Approved & Live', count: approvedHotelsCount },
+                { id: 'SUSPENDED', label: 'Suspended / Blocked', count: suspendedHotelsCount },
+                ...(isAdminUser(currentUser) || isStaffUser(currentUser) ? [{ id: 'DELETED', label: 'Deleted Hotels (Archive)', count: deletedHotelsCount, isDeletedTab: true }] : []),
+              ].map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => {
+                    if (tab.isDeletedTab) {
+                      handleSelectTab('DELETED_HOTELS');
+                    } else {
+                      setHotelStatusFilter(tab.id);
+                    }
+                  }}
+                  className={`flex-1 min-w-[150px] px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                    (tab.isDeletedTab && activeTab === 'DELETED_HOTELS') || (!tab.isDeletedTab && hotelStatusFilter === tab.id)
+                      ? 'bg-gradient-to-r from-[#BF8E36] via-[#D8A74B] to-[#BF8E36] text-slate-950 font-black shadow-md shadow-amber-950/30'
+                      : tab.isDeletedTab
+                        ? 'text-rose-300 hover:text-white hover:bg-rose-500/20 border border-rose-500/30'
+                        : 'text-white hover:text-[#F3E5AB] hover:bg-white/10'
+                  }`}
+                >
+                  {tab.hasPulse && (
+                    <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping inline-block" />
+                  )}
+                  {tab.isDeletedTab && (
+                    <Archive className="w-3.5 h-3.5 shrink-0 text-rose-400" />
+                  )}
+                  <span className={(tab.isDeletedTab && activeTab === 'DELETED_HOTELS') || (!tab.isDeletedTab && hotelStatusFilter === tab.id) ? 'text-slate-950 font-black' : tab.isDeletedTab ? 'text-rose-200 font-bold' : 'text-white font-bold'}>{tab.label}</span>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
+                    (tab.isDeletedTab && activeTab === 'DELETED_HOTELS') || (!tab.isDeletedTab && hotelStatusFilter === tab.id) ? 'bg-slate-950 text-white shadow-xs' : tab.isDeletedTab ? 'bg-rose-500/30 text-rose-200' : 'bg-white/20 text-white'
+                  }`}>
+                    {tab.count}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 text-slate-900 font-bold uppercase tracking-wider border-b border-slate-200">
+                    <tr>
+                      <th className="p-4">Hotel Property</th>
+                      <th className="p-4">Hotel Owner & Status</th>
+                      <th className="p-4">City / Location</th>
+                      <th className="p-4">Star Rating</th>
+                      <th className="p-4">Starting Price</th>
+                      <th className="p-4">Approval Status</th>
+                      <th className="p-4 text-right">{isAdminUser(currentUser) ? 'Super Admin Actions' : 'Verification Actions'}</th>
+                    </tr>
+                  </thead>
                 <tbody className="divide-y divide-slate-100 font-normal text-black">
                   {filteredHotels.length === 0 ? (
                     <tr>
@@ -2709,15 +3002,32 @@ const AdminDashboard = () => {
                 </tbody>
               </table>
             </div>
-            <Pagination
-              currentPage={adminHotelsPage}
-              totalItems={filteredHotels.length}
-              itemsPerPage={10}
-              onPageChange={setAdminHotelsPage}
-              color="gold"
-              theme="luxury"
-            />
           </div>
+          <Pagination
+            currentPage={adminHotelsPage}
+            totalItems={filteredHotels.length}
+            itemsPerPage={10}
+            onPageChange={setAdminHotelsPage}
+            color="gold"
+            theme="luxury"
+          />
+        </div>
+      )}
+
+        {/* TAB: DELETED HOTELS PERMANENT HISTORICAL ARCHIVE */}
+        {activeTab === 'DELETED_HOTELS' && (
+          <DeletedHotelsManagement
+            hotelsList={hotelsList}
+            bookingsList={bookingsList}
+            paymentsList={paymentsList}
+            currentUser={currentUser}
+            showToast={showToast}
+            onRestoreHotel={(id) => {
+              setHotelsList(prev => prev.map(h => h.id === id ? { ...h, status: 'SUBMITTED', is_deleted: false } : h));
+              setDeletedMetaMap(getDeletedHotelsMeta());
+            }}
+            onRefresh={() => fetchAdminData()}
+          />
         )}
 
         {/* TAB: STAFF MANAGEMENT (PHASE 1 UI) */}
@@ -4047,7 +4357,10 @@ const AdminDashboard = () => {
                   </div>
                 </div>
                 <div className="text-2xl font-black text-slate-900">
-                  {bookingsList.filter(b => (b.status || b.booking_status || '').toUpperCase() === 'CANCELLATION_REQUESTED').length}
+                  {bookingsList.filter(b => {
+                    const s = (b.status || b.booking_status || '').toUpperCase();
+                    return s === 'CANCEL_REQUESTED' || s === 'CANCELLATION_REQUESTED';
+                  }).length}
                 </div>
                 <p className="text-xs text-blue-700 font-semibold mt-1">
                   Pending owner verification
@@ -4109,7 +4422,10 @@ const AdminDashboard = () => {
                       : 'bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200'
                   }`}
                 >
-                  Awaiting Owner ({bookingsList.filter(b => (b.status || b.booking_status || '').toUpperCase() === 'CANCELLATION_REQUESTED').length})
+                  Awaiting Owner ({bookingsList.filter(b => {
+                    const s = (b.status || b.booking_status || '').toUpperCase();
+                    return s === 'CANCEL_REQUESTED' || s === 'CANCELLATION_REQUESTED';
+                  }).length})
                 </button>
                 <button
                   type="button"
@@ -4294,7 +4610,7 @@ const AdminDashboard = () => {
                                 </span>
                               ) : (
                                 <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-extrabold bg-slate-100 text-slate-600">
-                                  CANCELLATION_REQUESTED
+                                  CANCEL_REQUESTED
                                 </span>
                               )}
                             </td>

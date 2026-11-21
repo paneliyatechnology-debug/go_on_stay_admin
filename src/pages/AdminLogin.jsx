@@ -5,6 +5,20 @@ import { useAuth } from '../context/AuthContext';
 import { parseApiError } from '../utils/errorHandler';
 import FieldError from '../components/FieldError';
 import staffAuthService from '../services/staffAuthService';
+import { isStaffUser, getDefaultTabForUser } from '../utils/permissionUtils';
+
+const TAB_TO_SLUG = {
+  OVERVIEW: 'overview',
+  HOTELS: 'hotels',
+  USERS: 'users',
+  STAFF: 'staff',
+  BOOKINGS: 'bookings',
+  SETTLEMENTS: 'settlements',
+  REFUNDS: 'refunds',
+  PAYMENTS: 'payments',
+  COUPONS: 'coupons',
+  TICKETS: 'tickets',
+};
 
 const AdminLogin = () => {
   const [username, setUsername] = useState('');
@@ -41,7 +55,13 @@ const AdminLogin = () => {
 
   useEffect(() => {
     if (user && (user.is_staff || user.is_superuser || ['ADMIN', 'SUPER_ADMIN'].includes(user.role) || user.isStaff || user.role === 'STAFF')) {
-      navigate('/dashboard', { replace: true });
+      if (isStaffUser(user)) {
+        const defTab = getDefaultTabForUser(user);
+        const defSlug = defTab ? TAB_TO_SLUG[defTab] : 'bookings';
+        navigate(`/dashboard/${defSlug}`, { replace: true });
+      } else {
+        navigate('/dashboard', { replace: true });
+      }
     }
   }, [user, navigate]);
 
@@ -72,7 +92,14 @@ const AdminLogin = () => {
           setChangeOldPassword(password);
           setShowChangePasswordModal(true);
         } else {
-          navigate(from, { replace: true });
+          const isStaff = isStaffUser(result.user) || result.isStaff;
+          if (isStaff) {
+            const defTab = getDefaultTabForUser(result.user);
+            const defSlug = defTab ? TAB_TO_SLUG[defTab] : 'bookings';
+            navigate(`/dashboard/${defSlug}`, { replace: true });
+          } else {
+            navigate(from, { replace: true });
+          }
         }
       } else {
         const parsed = parseApiError({ response: { data: result } }, result.error || 'Authentication failed. Please verify credentials.');
